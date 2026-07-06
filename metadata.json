@@ -1,0 +1,6 @@
+{
+  "name": "MARSO SPECIALIST",
+  "description": "Interactive product catalog and AI consultant for Marso Company's rubber products.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "1",
+    "name": "Agricultural & Farm Rubber Mats",
+    "nameAr": "حصائر المطاط الزراعية ومزارع المواشي",
+    "category": "Rubber Mat Flooring",
+    "photo": "https://images.unsplash.com/photo-1500937386664-56d1dfef3854?auto=format&fit=crop&q=80&w=400",
+    "extraPhotos": [],
+    "specs": {
+      "code": "MC-001RM",
+      "sizeDims": "100x200cm, Thickness: 10mm (customizable)",
+      "weight": "15.5 - 17 kg",
+      "features": "Non-slip, high elasticity, reduces stress on animal joints, insulates against cold/damp",
+      "physicalSpecs": "Hardness: 53 ± 5 Shore A, Tensile Strength: 5 N/mm2 min",
+      "material": "SBR Rubber",
+      "color": "Black",
+      "application": "Covers stable areas, barns, cow stalls, and animal pathways"
+    }
+  },
+  {
+    "id": "2",
+    "name": "MARSO Anti-Abrasion Rubber Lining",
+    "nameAr": "بطانة المطاط المقاومة للتآكل والبرش",
+    "category": "Constructive Rubber Industries",
+    "photo": "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&q=80&w=400",
+    "extraPhotos": [],
+    "specs": {
+      "code": "MC-001AR",
+      "sizeDims": "Width: Up to 1500mm, Thickness: 3mm – 25mm",
+      "weight": "Depending on thickness and dimensions",
+      "features": "High tensile strength, maximum tear resistance, supreme absorption of abrasive materials",
+      "physicalSpecs": "Hardness: 50 ± 5 Shore A, Tensile Strength: 3.5 MPa min",
+      "material": "Natural & Synthetic Rubber Blend",
+      "color": "Black / Dark Grey",
+      "application": "Shot blasting rooms, parking bumpers, heavy workshops wall protective lining"
+    }
+  }
+]
