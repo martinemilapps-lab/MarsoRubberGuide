@@ -8,8 +8,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const currentFilename = typeof import.meta !== "undefined" && import.meta.url ? fileURLToPath(import.meta.url) : (typeof __filename !== "undefined" ? __filename : "");
+const currentDirname = typeof import.meta !== "undefined" && import.meta.url ? path.dirname(currentFilename) : (typeof __dirname !== "undefined" ? __dirname : process.cwd());
 
 const app = express();
 const PORT = 3000;
@@ -466,4 +466,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
