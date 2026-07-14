@@ -29,24 +29,126 @@ if (process.env.VERCEL && !fs.existsSync(PRODUCTS_FILE_PATH)) {
   }
 }
 
-function getStoredProducts(): any[] {
+const KV_APP_KEY = "marsoappkey2026";
+const KV_KEY = "catalog_blob_id";
+
+// Dynamic cache in-memory to prevent unnecessary fetching within the same request execution
+let cachedProducts: any[] | null = null;
+let lastFetchTime = 0;
+const CACHE_TTL_MS = 2000; // 2 seconds fast-cache to protect against rapid successive calls in a single execution
+
+async function getStoredProducts(): Promise<any[]> {
+  const now = Date.now();
+  if (cachedProducts && (now - lastFetchTime < CACHE_TTL_MS)) {
+    return cachedProducts;
+  }
+
   try {
+    // 1. Get JSONBlob ID from keyvalue.immanuel.co
+    const getBlobIdRes = await fetch(`https://keyvalue.immanuel.co/api/KeyVal/GetValue/${KV_APP_KEY}/${KV_KEY}`);
+    let blobId = "";
+    if (getBlobIdRes.ok) {
+      const text = await getBlobIdRes.text();
+      // Clean up string quotes returned by the keyvalue API
+      blobId = text.replace(/^"|"$/g, '').trim();
+    }
+
+    if (blobId && /^[a-f0-9-]+$/i.test(blobId)) {
+      // 2. Fetch from JSONBlob
+      const blobRes = await fetch(`https://jsonblob.com/api/jsonBlob/${blobId}`);
+      if (blobRes.ok) {
+        const data = await blobRes.json();
+        if (Array.isArray(data)) {
+          cachedProducts = data;
+          lastFetchTime = now;
+          // Synchronize local /tmp cache asynchronously
+          try {
+            fs.writeFileSync(PRODUCTS_FILE_PATH, JSON.stringify(data, null, 2), "utf-8");
+          } catch (e) {}
+          return data;
+        }
+      }
+    }
+
+    // 3. Fallback to dynamic local /tmp/products.json file if remote fails
     if (fs.existsSync(PRODUCTS_FILE_PATH)) {
       const fileData = fs.readFileSync(PRODUCTS_FILE_PATH, "utf-8");
-      return JSON.parse(fileData);
+      const parsed = JSON.parse(fileData);
+      if (Array.isArray(parsed)) {
+        // Re-publish to remote to heal database
+        await publishToRemote(parsed);
+        cachedProducts = parsed;
+        lastFetchTime = now;
+        return parsed;
+      }
     }
   } catch (err) {
-    console.error("Error reading stored products file:", err);
+    console.error("[Sync] Error retrieving remote products, falling back to local file:", err);
   }
+
+  // Final fallback to static seeds
   return productsData;
 }
 
-function saveStoredProducts(productsList: any[]) {
+async function publishToRemote(productsList: any[]): Promise<string> {
+  try {
+    // 1. Get current blob ID
+    const getBlobIdRes = await fetch(`https://keyvalue.immanuel.co/api/KeyVal/GetValue/${KV_APP_KEY}/${KV_KEY}`);
+    let blobId = "";
+    if (getBlobIdRes.ok) {
+      const text = await getBlobIdRes.text();
+      blobId = text.replace(/^"|"$/g, '').trim();
+    }
+
+    if (blobId && /^[a-f0-9-]+$/i.test(blobId)) {
+      // Try updating existing
+      const putRes = await fetch(`https://jsonblob.com/api/jsonBlob/${blobId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(productsList)
+      });
+      if (putRes.ok) {
+        return blobId;
+      }
+    }
+
+    // Create new blob if no blob ID or PUT failed
+    const createRes = await fetch("https://jsonblob.com/api/jsonBlob", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(productsList)
+    });
+    if (createRes.ok) {
+      const location = createRes.headers.get("location");
+      const newId = location ? location.split("/").pop() : createRes.headers.get("x-jsonblob-id");
+      if (newId) {
+        // Update keyvalue pointer
+        await fetch(`https://keyvalue.immanuel.co/api/KeyVal/UpdateValue/${KV_APP_KEY}/${KV_KEY}/${newId}`, {
+          method: "POST"
+        });
+        return newId;
+      }
+    }
+  } catch (err) {
+    console.error("[Sync] Failed to publish products list to remote DB:", err);
+  }
+  return "";
+}
+
+async function saveStoredProducts(productsList: any[]) {
+  // Update local in-memory cache instantly
+  cachedProducts = productsList;
+  lastFetchTime = Date.now();
+
+  // 1. Write to local file for fast load / fallback
   try {
     fs.writeFileSync(PRODUCTS_FILE_PATH, JSON.stringify(productsList, null, 2), "utf-8");
   } catch (err) {
-    console.error("Error writing stored products file:", err);
+    console.error("Error writing stored products file locally:", err);
   }
+
+  // 2. Publish to remote database to keep Vercel containers in sync
+  await publishToRemote(productsList);
 }
 
 const ADMIN_SECRET = "marso_admin_token_2026";
@@ -159,9 +261,9 @@ if (!fs.existsSync(DATASHEETS_DIR)) {
 }
 
 // 1. Get all products
-app.get("/api/products", (req, res) => {
+app.get("/api/products", async (req, res) => {
   try {
-    const products = getStoredProducts();
+    const products = await getStoredProducts();
     res.json(products);
   } catch (err: any) {
     console.error("Error reading stored products file:", err);
@@ -170,9 +272,9 @@ app.get("/api/products", (req, res) => {
 });
 
 // 2. Create a new product (Secured)
-app.post("/api/products", checkAdminAuth, (req, res) => {
+app.post("/api/products", checkAdminAuth, async (req, res) => {
   try {
-    const products = getStoredProducts();
+    const products = await getStoredProducts();
     const newProduct = {
       id: String(Date.now()),
       name: req.body.name || "Unnamed Product",
@@ -194,7 +296,7 @@ app.post("/api/products", checkAdminAuth, (req, res) => {
       datasheetName: req.body.datasheetName || undefined
     };
     products.unshift(newProduct);
-    saveStoredProducts(products);
+    await saveStoredProducts(products);
     res.status(201).json(newProduct);
   } catch (err: any) {
     console.error("Failed to create product:", err);
@@ -203,10 +305,10 @@ app.post("/api/products", checkAdminAuth, (req, res) => {
 });
 
 // 3. Update a product (Secured)
-app.put("/api/products/:id", checkAdminAuth, (req, res) => {
+app.put("/api/products/:id", checkAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const products = getStoredProducts();
+    const products = await getStoredProducts();
     const index = products.findIndex((p) => String(p.id) === String(id));
     if (index === -1) {
       return res.status(404).json({ error: "Product not found" });
@@ -244,7 +346,7 @@ app.put("/api/products/:id", checkAdminAuth, (req, res) => {
       datasheetFile: req.body.datasheetFile !== undefined ? req.body.datasheetFile : products[index].datasheetFile,
       datasheetName: req.body.datasheetName !== undefined ? req.body.datasheetName : products[index].datasheetName
     };
-    saveStoredProducts(products);
+    await saveStoredProducts(products);
     res.json(products[index]);
   } catch (err: any) {
     console.error("Failed to update product:", err);
@@ -253,16 +355,16 @@ app.put("/api/products/:id", checkAdminAuth, (req, res) => {
 });
 
 // 4. Delete a product (Secured)
-app.delete("/api/products/:id", checkAdminAuth, (req, res) => {
+app.delete("/api/products/:id", checkAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const products = getStoredProducts();
+    const products = await getStoredProducts();
     const index = products.findIndex((p) => String(p.id) === String(id));
     if (index === -1) {
       return res.status(404).json({ error: "Product not found" });
     }
     const deleted = products.splice(index, 1);
-    saveStoredProducts(products);
+    await saveStoredProducts(products);
 
     // Clean up associated physical datasheet PDF from disk
     if (deleted[0] && deleted[0].datasheetFile) {
@@ -284,14 +386,14 @@ app.delete("/api/products/:id", checkAdminAuth, (req, res) => {
 });
 
 // 5. Download Product Datasheet
-app.get("/api/products/:id/datasheet", (req, res) => {
+app.get("/api/products/:id/datasheet", async (req, res) => {
   try {
     const { id } = req.params;
     if (!id || typeof id !== "string") {
       return res.status(400).json({ error: "Product ID is required and must be a string." });
     }
 
-    const products = getStoredProducts();
+    const products = await getStoredProducts();
     const product = products.find((p) => String(p.id) === String(id));
     if (!product) {
       return res.status(404).json({ error: "Product not found." });
@@ -471,7 +573,7 @@ app.post("/api/chat", async (req, res) => {
       return res.status(500).json({ error: keyErr.message || "Failed to initialize Gemini client." });
     }
 
-    const productsList = getStoredProducts();
+    const productsList = await getStoredProducts();
 
     // System instructions detailing the specialist persona, Marso knowledge framework, products catalog, and operational guidelines
     const systemInstruction = `You are the MARSO RUBBER Product Specialist, an expert consultant for high-quality rubber products manufactured by Marso Company (Origin of Rubber Industries and Floors / مارسو للمطاط).
