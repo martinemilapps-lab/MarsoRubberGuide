@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 // @ts-ignore
-import marsoLogo from "./assets/images/marso_logo_1782914116953.jpg";
+import marsoLogo from "./assets/images/the_logo.png";
 import { Product, ProductClassification, ChatMessage } from "./types";
 import { PRODUCT_CATEGORIES, CATEGORY_DETAILS } from "./constants";
 import ProductCard from "./components/ProductCard";
