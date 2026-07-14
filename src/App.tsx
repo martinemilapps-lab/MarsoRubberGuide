@@ -58,20 +58,25 @@ export default function App() {
 
   // Admin Mode detection and authorization key storing
   const [isAdmin, setIsAdmin] = useState<boolean>(() => {
-    const stored = localStorage.getItem("marso_admin_mode");
-    if (stored === "true") return true;
-
     const params = new URLSearchParams(window.location.search);
+    const hasAdmin01 = params.has("admin01") || params.get("access")?.toLowerCase() === "admin01" || params.get("admin")?.toLowerCase() === "admin01";
     const hasAdmin = params.get("admin") === "true";
     const hasAccess = params.get("access")?.toLowerCase() === "marso_admin" || params.get("access")?.toLowerCase() === "admin";
     const hasKey = params.get("key")?.toLowerCase() === "marso_admin_2026" || params.get("key")?.toLowerCase() === "marso";
 
-    const authorized = hasAdmin || hasAccess || hasKey;
+    const authorized = hasAdmin01 || hasAdmin || hasAccess || hasKey;
     if (authorized) {
       localStorage.setItem("marso_admin_mode", "true");
       return true;
     }
-    return false;
+
+    // Clean URL without query params forces logout to keep User version strictly isolated
+    if (!window.location.search) {
+      localStorage.removeItem("marso_admin_mode");
+      return false;
+    }
+
+    return localStorage.getItem("marso_admin_mode") === "true";
   });
 
   const ADMIN_TOKEN = "marso_admin_token_2026";
