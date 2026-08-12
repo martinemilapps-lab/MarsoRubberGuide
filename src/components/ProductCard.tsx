@@ -51,7 +51,8 @@ export default function ProductCard({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
       whileHover={{ y: -4 }}
-      className={`bg-white rounded-xl border border-gray-100 shadow-xs hover:shadow-md transition-all overflow-hidden flex flex-col h-full text-right ${
+      onClick={() => onSelect(product)}
+      className={`bg-white/65 backdrop-blur-xs rounded-xl border border-gray-200/80 shadow-2xs hover:shadow-md hover:bg-white/85 hover:border-red-200 transition-all overflow-hidden flex flex-col h-full cursor-pointer ${
         isRtl ? "font-sans text-right" : "font-sans text-left"
       }`}
     >
@@ -61,6 +62,8 @@ export default function ProductCard({
           <img
             src={product.photo}
             alt={localizedInfo.name}
+            loading="eager"
+            decoding="async"
             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
             referrerPolicy="no-referrer"
             onError={(e) => {
@@ -70,14 +73,13 @@ export default function ProductCard({
             }}
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end p-4">
-            <button
+            <div
               id={`view-details-btn-${product.id}`}
-              onClick={() => onSelect(product)}
               className="w-full py-2 px-3 bg-white/95 text-gray-900 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm hover:bg-white active:scale-95 transition-all cursor-pointer"
             >
               <Eye className="w-3.5 h-3.5 text-red-600" />
               {t.viewTechnicalSpecs}
-            </button>
+            </div>
           </div>
 
           {/* Category Tag */}
@@ -118,23 +120,31 @@ export default function ProductCard({
             </div>
           )}
 
-          <h3 className="font-sans font-bold text-gray-900 text-base line-clamp-1 hover:text-red-600 transition-colors cursor-pointer" onClick={() => onSelect(product)}>
+          <h3 className="font-sans font-bold text-gray-900 text-base hover:text-red-600 transition-colors cursor-pointer break-words whitespace-normal leading-snug" onClick={() => onSelect(product)}>
             {localizedInfo.name}
           </h3>
 
           <div className={`mt-3 space-y-1.5 text-xs text-gray-600 pl-2.5 ${isRtl ? "border-r-2 border-red-500 pr-2.5 border-l-0 pl-0" : "border-l-2 border-red-500 pl-2.5"}`}>
-            <p className="flex justify-between items-center gap-4">
+            <p className="flex justify-between items-center gap-2">
               <span className="font-medium text-gray-400 font-mono tracking-tight text-[10px] shrink-0 uppercase">{isRtl ? "الكود" : "Code"}</span>
-              <span className="font-bold text-gray-800 text-right truncate max-w-[160px]">{product.specs.code || "N/A"}</span>
+              <span className="font-bold text-gray-800 text-end truncate min-w-0 flex-1">{product.specs.code || "N/A"}</span>
             </p>
-            <p className="flex justify-between items-center gap-4">
+            <p className="flex justify-between items-center gap-2">
               <span className="font-medium text-gray-400 font-mono tracking-tight text-[10px] shrink-0 uppercase">{isRtl ? "المادة" : "Material"}</span>
-              <span className="font-semibold text-gray-800 text-right truncate max-w-[160px]">{translateTerm(product.specs.material || "Standard", lang)}</span>
+              <span className="font-semibold text-gray-800 text-end truncate min-w-0 flex-1">{translateTerm(product.specs.material || "Standard", lang)}</span>
             </p>
-            <p className="flex justify-between items-center gap-4">
+            <p className="flex justify-between items-center gap-2">
               <span className="font-medium text-gray-400 font-mono tracking-tight text-[10px] shrink-0 uppercase">{isRtl ? "الاستخدام" : "Application"}</span>
-              <span className="font-semibold text-gray-800 text-right truncate max-w-[160px]">{translateTerm(product.specs.application || "Optimized", lang)}</span>
+              <span className="font-semibold text-gray-800 text-end truncate min-w-0 flex-1">{translateTerm(product.specs.application || "Optimized", lang)}</span>
             </p>
+            {(product.specs?.price || product.price) && (
+              <p className="flex justify-between items-center gap-2 text-red-700 bg-red-50/70 px-2 py-1 rounded-md border border-red-100/60 my-1 font-bold">
+                <span className="font-medium text-gray-500 font-mono tracking-tight text-[10px] shrink-0 uppercase">{isRtl ? "السعر" : "Price"}</span>
+                <span className="font-extrabold text-red-600 text-end truncate min-w-0 flex-1">
+                  {product.specs?.price || product.price} <span className="text-[10px] font-mono">{product.specs?.priceCurrency || product.priceCurrency || "EGP"}</span>
+                </span>
+              </p>
+            )}
           </div>
 
           <p className="mt-4 text-xs text-gray-500 line-clamp-2 leading-relaxed italic">
@@ -143,20 +153,22 @@ export default function ProductCard({
         </div>
 
         <div className="mt-5 pt-3 border-t border-gray-100 flex items-center justify-between">
-          <button
+          <div
             id={`open-detail-link-${product.id}`}
-            onClick={() => onSelect(product)}
             className="text-xs font-semibold text-gray-500 hover:text-red-600 flex items-center gap-1 transition-colors cursor-pointer"
           >
             <Shield className="w-3.5 h-3.5 text-red-600/70" />
             {t.viewFullProfile}
-          </button>
+          </div>
 
           {isAdmin && (
             <div className="flex gap-1.5" dir="ltr">
               <button
                 id={`edit-product-btn-${product.id}`}
-                onClick={() => onEdit(product)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEdit(product);
+                }}
                 className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer"
                 title={t.editProduct}
               >
@@ -164,7 +176,10 @@ export default function ProductCard({
               </button>
               <button
                 id={`delete-product-btn-${product.id}`}
-                onClick={() => onDelete(product.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(product.id);
+                }}
                 className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                 title={t.deleteProduct}
               >

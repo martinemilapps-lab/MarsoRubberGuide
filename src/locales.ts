@@ -69,6 +69,19 @@ export interface TranslationSchema {
   customProductSpecs: string;
   editEntryTitle: string;
   registerNewEntryTitle: string;
+  manageCategories: string;
+  addCategory: string;
+  editCategory: string;
+  clearUnusedCategories: string;
+  categoryNamePlaceholder: string;
+  categoryAdded: string;
+  categoryUpdated: string;
+  categoryDeleted: string;
+  categoriesCleared: string;
+  confirmDeleteCategory: string;
+  priceLabel: string;
+  currencyLabel: string;
+  pricePlaceholder: string;
 }
 
 export const TRANSLATIONS: Record<Language, TranslationSchema> = {
@@ -76,7 +89,7 @@ export const TRANSLATIONS: Record<Language, TranslationSchema> = {
     dir: "rtl",
     companyName: "MARSO",
     companySubName: "شركة مارسو (أصل صناعات وأرضيات المطاط)",
-    specialistCenter: "مركز الاستشارات الفنية",
+    specialistCenter: "MARSO DIGITAL CATALOG",
     specCatalog: "دليل المنتجات",
     aiConsultant: "المستشار الذكي AI",
     isoStandards: "شهادات الأيزو 9001 | 14001 | 45001",
@@ -102,7 +115,7 @@ export const TRANSLATIONS: Record<Language, TranslationSchema> = {
     chemicalCompatibility: "الملائمة الكيميائية",
     passedStandard: "مطابق للمواصفات الفنية المعتمدة",
     engineeredFeatures: "الميزات الهندسية والتطبيقية",
-    requestQuote: "طلب عرض سعر",
+    requestQuote: "طلب عرض سعر وكود تحميل المواصفات",
     downloadDataSheet: "تحميل ورقة المواصفات الفنية",
     noProductSelected: "لم يتم اختيار منتج",
     noProductSelectedDesc: "اختر منتجًا من كتالوج قاعدة البيانات لعرض خصائصه الميكانيكية، وطلب الرسومات الفنية، وتصدير شهادات المطابقة.",
@@ -140,14 +153,27 @@ export const TRANSLATIONS: Record<Language, TranslationSchema> = {
     customProductTitle: "منتج مخصص بالهندسة العكسية",
     customProductSpecs: "مواصفات مصممة هندسياً بناءً على طلب العميل والرسومات الفنية",
     editEntryTitle: "تعديل تفاصيل المنتج",
-    registerNewEntryTitle: "تسجيل منتج مطاطي جديد في الكتالوج"
+    registerNewEntryTitle: "تسجيل منتج مطاطي جديد في الكتالوج",
+    manageCategories: "إدارة التصنيفات",
+    addCategory: "إضافة تصنيف جديد",
+    editCategory: "تعديل اسم التصنيف",
+    clearUnusedCategories: "مسح التصنيفات الفارغة (0 منتج)",
+    categoryNamePlaceholder: "أدخل اسم التصنيف الفني...",
+    categoryAdded: "تمت إضافة التصنيف بنجاح",
+    categoryUpdated: "تم تحديث التصنيف بنجاح",
+    categoryDeleted: "تم حذف التصنيف",
+    categoriesCleared: "تم مسح جميع التصنيفات الفارغة بنجاح",
+    confirmDeleteCategory: "هل أنت تأكد من رغبتك في حذف هذا التصنيف؟",
+    priceLabel: "السعر والتقدير المالي (اختياري)",
+    currencyLabel: "العملة",
+    pricePlaceholder: "مثال: 250 / متر مربع أو حسب الرسم الهندسي..."
   },
   en: {
     dir: "ltr",
     companyName: "MARSO",
     companySubName: "Marso Company (Origin of Rubber Industries and Floors)",
-    specialistCenter: "Specialist Center",
-    specCatalog: "SPEC CATALOG",
+    specialistCenter: "MARSO DIGITAL CATALOG",
+    specCatalog: "PRODUCT CATALOG",
     aiConsultant: "AI CONSULTANT",
     isoStandards: "ISO 9001 | 14001 | 45001 STANDARDS",
     categories: "Categories",
@@ -172,7 +198,7 @@ export const TRANSLATIONS: Record<Language, TranslationSchema> = {
     chemicalCompatibility: "Compatibility",
     passedStandard: "Meets certified engineering safety guidelines",
     engineeredFeatures: "Engineered Features",
-    requestQuote: "REQUEST QUOTE",
+    requestQuote: "REQUEST QUOTE & GET DATA ACCESS",
     downloadDataSheet: "DOWNLOAD SPEC DATA SHEET",
     noProductSelected: "No product selected",
     noProductSelectedDesc: "Select a product from the database catalog to view mechanical specs, request official drawings, and export compliance profiles.",
@@ -210,7 +236,20 @@ export const TRANSLATIONS: Record<Language, TranslationSchema> = {
     customProductTitle: "Custom Reverse Engineered Rubber Component",
     customProductSpecs: "Molded or compound configured exactly matching user request.",
     editEntryTitle: "Edit Product Detail",
-    registerNewEntryTitle: "Register New Rubber Product Entry"
+    registerNewEntryTitle: "Register New Rubber Product Entry",
+    manageCategories: "Manage Classifications",
+    addCategory: "Add Classification",
+    editCategory: "Edit Classification",
+    clearUnusedCategories: "Clear Unused Classifications (0 Products)",
+    categoryNamePlaceholder: "Enter classification name...",
+    categoryAdded: "Classification added successfully",
+    categoryUpdated: "Classification updated successfully",
+    categoryDeleted: "Classification deleted",
+    categoriesCleared: "All unused classifications cleared successfully",
+    confirmDeleteCategory: "Are you sure you want to delete this classification?",
+    priceLabel: "Unit Price / Financial Rate (Optional)",
+    currencyLabel: "Currency",
+    pricePlaceholder: "e.g. 250 / sq.m or per drawing sample..."
   }
 };
 

@@ -1,6 +1,6 @@
 import { ProductClassification } from "./types";
 
-export const PRODUCT_CATEGORIES: ProductClassification[] = [
+export const DEFAULT_PRODUCT_CATEGORIES: string[] = [
   "Reclaimed and Crumb Rubber",
   "Rubber Tile Flooring",
   "Rubber Mat Flooring",
@@ -11,8 +11,10 @@ export const PRODUCT_CATEGORIES: ProductClassification[] = [
   "Reverse Engineering"
 ];
 
+export const PRODUCT_CATEGORIES: string[] = [...DEFAULT_PRODUCT_CATEGORIES];
+
 export const CATEGORY_DETAILS: Record<
-  ProductClassification,
+  string,
   { iconName: string; description: string; color: string; bg: string }
 > = {
   "Reclaimed and Crumb Rubber": {
@@ -64,3 +66,48 @@ export const CATEGORY_DETAILS: Record<
     bg: "bg-red-50"
   }
 };
+
+export function getCategoryDetails(cat: string) {
+  if (CATEGORY_DETAILS[cat]) {
+    return CATEGORY_DETAILS[cat];
+  }
+  return {
+    iconName: "Layers",
+    description: "Custom technical rubber product classification.",
+    color: "text-red-600 border-red-200",
+    bg: "bg-red-50"
+  };
+}
+
+export function categoryToSlug(category: string | "All"): string {
+  if (category === "All") return "";
+  return category
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+export function slugToCategory(path: string, categoriesList: string[] = PRODUCT_CATEGORIES): string | "All" {
+  if (!path) return "All";
+  const cleanPath = decodeURIComponent(path).split("?")[0].replace(/^\/+|\/+$/g, "");
+  if (!cleanPath || cleanPath.toLowerCase() === "all" || cleanPath.toLowerCase() === "catalog") {
+    return "All";
+  }
+
+  const list = categoriesList && categoriesList.length > 0 ? categoriesList : PRODUCT_CATEGORIES;
+  const exact = list.find(c => c.toLowerCase() === cleanPath.toLowerCase());
+  if (exact) return exact;
+
+  const normalize = (str: string) =>
+    str
+      .toLowerCase()
+      .replace(/^\d+[\.\-_s]*/, "")
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]/g, "");
+
+  const targetNormalized = normalize(cleanPath);
+
+  const matched = list.find(c => normalize(c) === targetNormalized);
+  return matched || "All";
+}

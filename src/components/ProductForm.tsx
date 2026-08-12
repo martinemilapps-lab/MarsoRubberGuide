@@ -10,6 +10,7 @@ interface ProductFormProps {
   onSave: (product: Partial<Product>) => void;
   onCancel: () => void;
   onAutoSaveQuiet?: (product: Product) => void;
+  availableCategories?: string[];
 }
 
 const PRESET_IMAGES = [
@@ -28,13 +29,13 @@ export default function ProductForm({
   lang,
   onSave,
   onCancel,
-  onAutoSaveQuiet
+  onAutoSaveQuiet,
+  availableCategories
 }: ProductFormProps) {
   const [name, setName] = useState("");
   const [nameAr, setNameAr] = useState("");
   const [category, setCategory] = useState<ProductClassification>("Reverse Engineering");
   const [photo, setPhoto] = useState("");
-  const [extraPhotos, setExtraPhotos] = useState<string[]>([]);
   const [code, setCode] = useState("");
   const [sizeDims, setSizeDims] = useState("");
   const [weight, setWeight] = useState("");
@@ -43,15 +44,19 @@ export default function ProductForm({
   const [material, setMaterial] = useState("");
   const [color, setColor] = useState("");
   const [application, setApplication] = useState("");
+  const [price, setPrice] = useState("");
+  const [priceCurrency, setPriceCurrency] = useState<"EGP" | "USD">("EGP");
   const [error, setError] = useState("");
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const isInitialMount = useRef(true);
   const prevProductRef = useRef<Product | null | undefined>(product);
+  const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Datasheet upload states
   const [datasheetFile, setDatasheetFile] = useState("");
   const [datasheetName, setDatasheetName] = useState("");
+  const [datasheetKnowledge, setDatasheetKnowledge] = useState("");
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractError, setExtractError] = useState("");
   const [isPdfDragging, setIsPdfDragging] = useState(false);
@@ -67,27 +72,85 @@ export default function ProductForm({
 
   const visiblePresets = PRESET_IMAGES.filter(img => !brokenUrls.includes(img.url));
 
-  const handleFileUpload = (file: File) => {
+  const compressImageFile = (file: File, maxWidth = 800, quality = 0.75): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!file.type.startsWith("image/")) {
+        resolve("");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const src = e.target?.result as string;
+        if (!src) {
+          resolve("");
+          return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(src);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          const webpData = canvas.toDataURL("image/webp", quality);
+          if (webpData && webpData.startsWith("data:image/webp")) {
+            resolve(webpData);
+          } else {
+            resolve(canvas.toDataURL("image/jpeg", quality));
+          }
+        };
+        img.onerror = () => resolve(src);
+        img.src = src;
+      };
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleFileUpload = async (file: File) => {
     if (!file.type.startsWith("image/")) {
       setPhotoError(isRtl ? "الملف المحدد ليس صورة صالحة" : "Selected file is not a valid image");
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setPhotoError(isRtl ? "حجم الصورة كبير جداً (الأقصى 5 ميجابايت)" : "Image file is too large (max 5MB)");
+    if (file.size > 15 * 1024 * 1024) {
+      setPhotoError(isRtl ? "حجم الصورة كبير جداً (الأقصى 15 ميجابايت)" : "Image file is too large (max 15MB)");
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (event.target?.result) {
-        setPhoto(event.target.result as string);
+    try {
+      const compressed = await compressImageFile(file, 800, 0.75);
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileData: compressed, filename: file.name, contentType: file.type })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.url) {
+          setPhoto(data.url);
+          setPhotoError("");
+          return;
+        }
+      }
+
+      if (compressed) {
+        setPhoto(compressed);
         setPhotoError("");
       }
-    };
-    reader.onerror = () => {
-      setPhotoError(isRtl ? "فشل قراءة ملف الصورة" : "Failed to read image file");
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setPhotoError(isRtl ? "فشل معالجة صورة المنتج" : "Failed to process product image");
+    }
   };
 
   const handleDatasheetUpload = async (file: File) => {
@@ -103,28 +166,62 @@ export default function ProductForm({
     setIsExtracting(true);
     setExtractError("");
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
+    const doUpload = async () => {
       try {
-        if (!event.target?.result) throw new Error("Could not read file data");
-        const base64 = event.target.result as string;
+        const reader = new FileReader();
+        const base64Data = await new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Failed to read PDF file"));
+          reader.readAsDataURL(file);
+        });
 
-        // Post to backend
+        // 1. Upload to Cloudflare R2 storage via Vercel backend
+        let r2FileUrl = "";
+        try {
+          const uploadRes = await fetch("/api/upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fileData: base64Data, filename: file.name, contentType: "application/pdf" })
+          });
+          if (uploadRes.ok) {
+            const uploadJson = await uploadRes.json();
+            r2FileUrl = uploadJson.url || uploadJson.key || "";
+          }
+        } catch (e) {
+          console.warn("[R2 Upload Notice]", e);
+        }
+
+        // 2. Extract specs with AI backend
         const res = await fetch("/api/datasheets/upload-and-extract", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer marso_admin_token_2026"
+            "Authorization": `Bearer ${sessionStorage.getItem("marso_admin_token") || ""}`
           },
           body: JSON.stringify({
-            pdfBase64: base64,
+            datasheetFile: r2FileUrl || base64Data,
             filename: file.name
           })
         });
 
         if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.error || "Failed to extract specifications");
+          let errMsg = isRtl ? "فشل استخراج المواصفات الفنية بواسطة الذكاء الاصطناعي" : "Failed to extract specifications";
+          try {
+            const errData = await res.json();
+            errMsg = errData.error || errMsg;
+          } catch (jsonErr) {
+            try {
+              const text = await res.text();
+              if (text && text.length < 200) {
+                errMsg = text;
+              } else {
+                errMsg = `Server error: ${res.status} ${res.statusText}`;
+              }
+            } catch (textErr) {
+              errMsg = `Server error: ${res.status} ${res.statusText}`;
+            }
+          }
+          throw new Error(errMsg);
         }
 
         const data = await res.json();
@@ -132,6 +229,7 @@ export default function ProductForm({
         // Auto-fill form fields!
         if (data.specs) {
           if (data.specs.name) setName(data.specs.name);
+          if (data.specs.nameAr) setNameAr(data.specs.nameAr);
           if (data.specs.category) setCategory(data.specs.category as ProductClassification);
           if (data.specs.code) setCode(data.specs.code);
           if (data.specs.sizeDims) setSizeDims(data.specs.sizeDims);
@@ -145,24 +243,33 @@ export default function ProductForm({
 
         setDatasheetFile(data.datasheetFile);
         setDatasheetName(data.datasheetName);
+        if (data.datasheetKnowledge) {
+          setDatasheetKnowledge(data.datasheetKnowledge);
+        }
         
       } catch (err: any) {
         console.error(err);
-        setExtractError(isRtl 
-          ? "فشل استخراج البيانات بواسطة الذكاء الاصطناعي. تأكد من جودة ملف الـ PDF." 
-          : err.message || "Failed to extract specifications via AI."
-        );
+        let errorMsg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
+        
+        let userFriendlyError = isRtl 
+          ? "فشل استخراج البيانات بواسطة الذكاء الاصطناعي." 
+          : "Failed to extract specifications via AI.";
+
+        if (errorMsg.includes("503") || errorMsg.includes("high demand") || errorMsg.includes("UNAVAILABLE")) {
+          userFriendlyError = isRtl
+            ? "تنبيه: خدمة الذكاء الاصطناعي تشهد ضغطاً مؤقتاً (503). تم حفظ وإرفاق ملف الـ PDF بنجاح، ويمكنك إدخال البيانات يدوياً."
+            : "AI service is under temporary high demand (503). Datasheet PDF attached successfully; specs can be entered manually.";
+        } else if (errorMsg && errorMsg.length < 150 && !errorMsg.includes("{")) {
+          userFriendlyError = errorMsg;
+        }
+
+        setExtractError(userFriendlyError);
       } finally {
         setIsExtracting(false);
       }
     };
 
-    reader.onerror = () => {
-      setExtractError(isRtl ? "فشل قراءة ملف الـ PDF" : "Failed to read PDF file.");
-      setIsExtracting(false);
-    };
-
-    reader.readAsDataURL(file);
+    doUpload();
   };
 
   useEffect(() => {
@@ -171,7 +278,6 @@ export default function ProductForm({
       setNameAr(product.nameAr || "");
       setCategory(product.category);
       setPhoto(product.photo);
-      setExtraPhotos(product.extraPhotos || []);
       setCode(product.specs?.code || "");
       setSizeDims(product.specs?.sizeDims || "");
       setWeight(product.specs?.weight || "");
@@ -180,8 +286,11 @@ export default function ProductForm({
       setMaterial(product.specs?.material || "");
       setColor(product.specs?.color || "");
       setApplication(product.specs?.application || "");
+      setPrice(product.specs?.price || product.price || "");
+      setPriceCurrency(product.specs?.priceCurrency || product.priceCurrency || "EGP");
       setDatasheetFile(product.datasheetFile || "");
       setDatasheetName(product.datasheetName || "");
+      setDatasheetKnowledge(product.datasheetKnowledge || "");
     } else {
       // Check if there is a draft in localStorage for new products
       const savedDraft = localStorage.getItem("marso_new_product_draft");
@@ -192,7 +301,6 @@ export default function ProductForm({
           setNameAr(draft.nameAr || "");
           setCategory(draft.category || "Reclaimed and Crumb Rubber");
           setPhoto(draft.photo || PRESET_IMAGES[0].url);
-          setExtraPhotos(draft.extraPhotos || []);
           setCode(draft.specs?.code || "");
           setSizeDims(draft.specs?.sizeDims || "");
           setWeight(draft.specs?.weight || "");
@@ -201,6 +309,8 @@ export default function ProductForm({
           setMaterial(draft.specs?.material || "");
           setColor(draft.specs?.color || "");
           setApplication(draft.specs?.application || "");
+          setPrice(draft.specs?.price || draft.price || "");
+          setPriceCurrency(draft.specs?.priceCurrency || draft.priceCurrency || "EGP");
           setDatasheetFile(draft.datasheetFile || "");
           setDatasheetName(draft.datasheetName || "");
         } catch (e) {
@@ -212,7 +322,6 @@ export default function ProductForm({
         setNameAr("");
         setCategory("Reclaimed and Crumb Rubber");
         setPhoto(PRESET_IMAGES[0].url);
-        setExtraPhotos([]);
         setCode("");
         setSizeDims("");
         setWeight("");
@@ -221,8 +330,11 @@ export default function ProductForm({
         setMaterial("");
         setColor("");
         setApplication("");
+        setPrice("");
+        setPriceCurrency("EGP");
         setDatasheetFile("");
         setDatasheetName("");
+        setDatasheetKnowledge("");
       }
     }
 
@@ -247,7 +359,7 @@ export default function ProductForm({
       nameAr,
       category,
       photo,
-      extraPhotos,
+      extraPhotos: [],
       specs: {
         code,
         sizeDims,
@@ -256,21 +368,25 @@ export default function ProductForm({
         physicalSpecs,
         material,
         color,
-        application
+        application,
+        price,
+        priceCurrency
       },
       datasheetFile: datasheetFile || undefined,
-      datasheetName: datasheetName || undefined
+      datasheetName: datasheetName || undefined,
+      datasheetKnowledge: datasheetKnowledge || undefined
     };
 
     if (product?.id) {
       setSaveStatus("saving");
-      const delayDebounceFn = setTimeout(async () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = setTimeout(async () => {
         try {
           const res = await fetch(`/api/products/${product.id}`, {
             method: "PUT",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": "Bearer marso_admin_token_2026"
+              "Authorization": `Bearer ${sessionStorage.getItem("marso_admin_token") || ""}`
             },
             body: JSON.stringify(updatedData)
           });
@@ -289,11 +405,14 @@ export default function ProductForm({
         }
       }, 1000);
 
-      return () => clearTimeout(delayDebounceFn);
+      return () => {
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      };
     } else {
       // New product - save draft to localStorage
       setSaveStatus("saving");
-      const delayDebounceFn = setTimeout(() => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = setTimeout(() => {
         try {
           localStorage.setItem("marso_new_product_draft", JSON.stringify(updatedData));
           setSaveStatus("saved");
@@ -303,14 +422,15 @@ export default function ProductForm({
         }
       }, 1000);
 
-      return () => clearTimeout(delayDebounceFn);
+      return () => {
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      };
     }
   }, [
     name,
     nameAr,
     category,
     photo,
-    extraPhotos,
     code,
     sizeDims,
     weight,
@@ -319,6 +439,8 @@ export default function ProductForm({
     material,
     color,
     application,
+    price,
+    priceCurrency,
     datasheetFile,
     datasheetName,
     product?.id
@@ -326,6 +448,9 @@ export default function ProductForm({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
     if (!name.trim()) {
       setError(isRtl ? "اسم المنتج باللغة الإنجليزية مطلوب" : "Product name in English is required");
       return;
@@ -343,7 +468,7 @@ export default function ProductForm({
       nameAr,
       category,
       photo,
-      extraPhotos,
+      extraPhotos: [],
       specs: {
         code,
         sizeDims,
@@ -352,10 +477,13 @@ export default function ProductForm({
         physicalSpecs,
         material,
         color,
-        application
+        application,
+        price,
+        priceCurrency
       },
       datasheetFile: datasheetFile || undefined,
-      datasheetName: datasheetName || undefined
+      datasheetName: datasheetName || undefined,
+      datasheetKnowledge: datasheetKnowledge || undefined
     });
   };
 
@@ -557,14 +685,60 @@ export default function ProductForm({
             id="input-category"
             value={category}
             onChange={(e) => setCategory(e.target.value as ProductClassification)}
-            className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all"
+            className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
           >
-            {PRODUCT_CATEGORIES.map((cat) => (
+            {Array.from(new Set([...(availableCategories && availableCategories.length > 0 ? availableCategories : PRODUCT_CATEGORIES), category])).map((cat) => (
               <option key={cat} value={cat}>
                 {CATEGORY_TRANSLATIONS[cat]?.[lang] || cat}
               </option>
             ))}
           </select>
+        </div>
+
+        {/* Price & Currency Field */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-gray-50/80 p-3.5 rounded-xl border border-gray-200/80">
+          <div className="sm:col-span-2">
+            <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1 text-right lg:text-left">
+              {t.priceLabel}
+            </label>
+            <input
+              id="input-price"
+              type="text"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              placeholder={t.pricePlaceholder}
+              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1 text-right lg:text-left">
+              {t.currencyLabel}
+            </label>
+            <div className="flex bg-white border border-gray-200 rounded-lg p-1">
+              <button
+                type="button"
+                onClick={() => setPriceCurrency("EGP")}
+                className={`flex-1 py-1.5 text-xs font-extrabold rounded transition-all cursor-pointer ${
+                  priceCurrency === "EGP"
+                    ? "bg-red-600 text-white shadow-2xs"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                EGP (ج.م)
+              </button>
+              <button
+                type="button"
+                onClick={() => setPriceCurrency("USD")}
+                className={`flex-1 py-1.5 text-xs font-extrabold rounded transition-all cursor-pointer ${
+                  priceCurrency === "USD"
+                    ? "bg-red-600 text-white shadow-2xs"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                USD ($)
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Specs sub-fields */}
@@ -625,19 +799,7 @@ export default function ProductForm({
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "الخواص الفيزيائية" : "Physical Specs."}
-            </label>
-            <input
-              id="input-physicalSpecs"
-              type="text"
-              value={physicalSpecs}
-              onChange={(e) => setPhysicalSpecs(e.target.value)}
-              placeholder={isRtl ? "مثال: صلابة 53 شور أ، قوة الشد 5 ميجا باسكال" : "e.g. Hardness: 53 Shore A, Tensile: 5 MPa"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
-            />
-          </div>
+
 
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
@@ -893,146 +1055,7 @@ export default function ProductForm({
           </div>
         </div>
 
-        {/* Advanced Extra Photos Controller */}
-        <div className="border border-gray-200 rounded-xl p-4.5 bg-[#FAFBFD] space-y-4 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <label className="block text-xs font-black uppercase tracking-wider text-gray-700 text-right lg:text-left">
-              {isRtl ? "صور إضافية للمنتج (تظهر في الملف التقني)" : "Supplementary Product Photos (Shown in Spec File)"}
-            </label>
-            <span className="text-[10px] font-bold bg-slate-200 text-slate-700 px-2 py-0.5 rounded-full font-mono">
-              {extraPhotos.length} {isRtl ? "صور" : "photos"}
-            </span>
-          </div>
 
-          <p className="text-[11px] text-gray-500 leading-relaxed">
-            {isRtl 
-              ? "أضف صورًا تقنية أو هندسية إضافية توضح تفاصيل الأبعاد والمواصفات وسيتم عرضها للمستخدمين في المعرض." 
-              : "Add technical or blueprint photos detailing dimensions or material structures. They will appear in the public specs view."}
-          </p>
-
-          {/* Grid of extra photos */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
-            {extraPhotos.map((url, index) => (
-              <div key={index} className="relative group h-28 rounded-lg overflow-hidden border border-gray-200 bg-slate-900 shadow-3xs">
-                <img 
-                  src={url} 
-                  alt={`Extra ${index + 1}`} 
-                  className="w-full h-full object-cover opacity-90 group-hover:scale-102 transition-transform duration-300"
-                  referrerPolicy="no-referrer"
-                />
-                
-                {/* Actions overlay on hover */}
-                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5">
-                  {/* Replace via upload */}
-                  <label className="cursor-pointer p-1.5 bg-white hover:bg-gray-100 text-slate-800 rounded-md shadow-sm active:scale-90 transition-all" title={isRtl ? "استبدال برفع ملف" : "Replace via upload"}>
-                    <Upload className="w-3.5 h-3.5 text-blue-600" />
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          if (!file.type.startsWith("image/")) return;
-                          const r = new FileReader();
-                          r.onload = (ev) => {
-                            if (ev.target?.result) {
-                              const newList = [...extraPhotos];
-                              newList[index] = ev.target.result as string;
-                              setExtraPhotos(newList);
-                            }
-                          };
-                          r.readAsDataURL(file);
-                        }
-                      }}
-                    />
-                  </label>
-
-                  {/* Replace via URL prompt */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const newUrl = prompt(isRtl ? "أدخل رابط الصورة الجديد:" : "Enter new image URL:", url);
-                      if (newUrl && newUrl.trim()) {
-                        const newList = [...extraPhotos];
-                        newList[index] = newUrl.trim();
-                        setExtraPhotos(newList);
-                      }
-                    }}
-                    className="p-1.5 bg-white hover:bg-gray-100 text-slate-800 rounded-md shadow-sm active:scale-90 transition-all cursor-pointer"
-                    title={isRtl ? "استبدال برابط" : "Replace via URL"}
-                  >
-                    <Link className="w-3.5 h-3.5 text-emerald-600" />
-                  </button>
-
-                  {/* Remove photo */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setExtraPhotos(prev => prev.filter((_, i) => i !== index));
-                    }}
-                    className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md shadow-sm active:scale-90 transition-all cursor-pointer"
-                    title={isRtl ? "إزالة" : "Remove"}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Index tag */}
-                <div className="absolute top-1.5 left-1.5 bg-slate-950/80 backdrop-blur-xs px-1.5 py-0.5 rounded text-[9px] font-bold text-gray-300 font-mono">
-                  #{index + 1}
-                </div>
-              </div>
-            ))}
-
-            {/* Custom Interactive card to Add a new Photo */}
-            <div className="h-28 rounded-lg border-2 border-dashed border-gray-300 hover:border-red-400 bg-white hover:bg-slate-50/50 flex flex-col items-center justify-center p-2 transition-all relative group">
-              <span className="text-[10px] font-black text-gray-700 flex items-center gap-1 mb-1.5 uppercase">
-                <Plus className="w-3 h-3 text-red-600" />
-                {isRtl ? "أضف صورة إضافية" : "Add Extra Photo"}
-              </span>
-
-              <div className="flex gap-1.5 w-full justify-center">
-                <label className="cursor-pointer bg-red-600 hover:bg-red-700 text-white text-[9px] font-bold px-2 py-1 rounded-md shadow-2xs active:scale-95 transition-all text-center flex items-center gap-1">
-                  <Upload className="w-3 h-3" />
-                  <span>{isRtl ? "رفع" : "Upload"}</span>
-                  <input 
-                    type="file" 
-                    accept="image/*" 
-                    className="hidden" 
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        if (!file.type.startsWith("image/")) return;
-                        const r = new FileReader();
-                        r.onload = (ev) => {
-                          if (ev.target?.result) {
-                            setExtraPhotos(prev => [...prev, ev.target.result as string]);
-                          }
-                        };
-                        r.readAsDataURL(file);
-                      }
-                    }}
-                  />
-                </label>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const url = prompt(isRtl ? "أدخل رابط الصورة الإضافية الجديدة:" : "Enter supplementary image URL:");
-                    if (url && url.trim()) {
-                      setExtraPhotos(prev => [...prev, url.trim()]);
-                    }
-                  }}
-                  className="bg-white hover:bg-gray-100 border border-gray-200 text-gray-700 text-[9px] font-bold px-2 py-1 rounded-md shadow-3xs active:scale-95 transition-all cursor-pointer flex items-center gap-1"
-                >
-                  <Link className="w-3 h-3 text-gray-400" />
-                  <span>{isRtl ? "رابط" : "URL"}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
 
         {/* Photo Gallery end */}
       </div>
