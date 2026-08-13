@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { generateNewAccessCode, getDeterministicOTP, CODE_EXPIRY_MS, GeneratedCode } from "../lib/accessCode";
+import { CODE_EXPIRY_MS, GeneratedCode } from "../lib/accessCode";
 import {
   Key,
   Copy,
@@ -28,6 +28,7 @@ export default function AdminCodeGeneratorModal({
   const [remainingSeconds, setRemainingSeconds] = useState<number>(300);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedMsg, setCopiedMsg] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   // Generate new code on open
   useEffect(() => {
@@ -53,12 +54,33 @@ export default function AdminCodeGeneratorModal({
 
   if (!isOpen) return null;
 
-  const handleGenerate = () => {
-    const newObj = generateNewAccessCode();
-    setCurrentCodeObj(newObj);
-    setRemainingSeconds(Math.floor(CODE_EXPIRY_MS / 1000));
-    setCopiedCode(false);
-    setCopiedMsg(false);
+  const handleGenerate = async () => {
+    setIsGenerating(true);
+    try {
+      const token = sessionStorage.getItem("marso_admin_token") || "";
+      const res = await fetch("/api/access-code/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (res.ok) {
+        const data: GeneratedCode = await res.json();
+        setCurrentCodeObj(data);
+        const diff = Math.max(0, Math.floor((data.expiresAt - Date.now()) / 1000));
+        setRemainingSeconds(diff);
+        setCopiedCode(false);
+        setCopiedMsg(false);
+      } else {
+        console.error("Failed to generate server access code.");
+      }
+    } catch (e) {
+      console.error("Error generating server access code:", e);
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const formatTimer = (totalSec: number) => {

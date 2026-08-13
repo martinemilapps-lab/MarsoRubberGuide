@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Product } from "../types";
 import { Language, CATEGORY_TRANSLATIONS } from "../locales";
-import { verifyAccessCode } from "../lib/accessCode";
+import { unlockSessionAccess } from "../lib/accessCode";
 import {
   ShieldCheck,
   PhoneCall,
@@ -100,9 +100,9 @@ export default function AccessCodeModal({
     }
   };
 
-  const handleVerify = (codeToVerify?: string) => {
-    const code = codeToVerify || digits.join("");
-    if (code.length !== 4) {
+  const handleVerify = async (codeToVerify?: string) => {
+    const code = (codeToVerify || digits.join("")).trim();
+    if (code.length !== 4 || !/^\d{4}$/.test(code)) {
       setErrorMsg(
         isAr
           ? "يرجى إدخال كود الدخول المكون من 4 أرقام كاملة."
@@ -114,21 +114,45 @@ export default function AccessCodeModal({
     setIsSubmitting(true);
     setErrorMsg(null);
 
-    setTimeout(() => {
-      const isValid = verifyAccessCode(code);
-      setIsSubmitting(false);
+    try {
+      const res = await fetch("/api/access-code/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code })
+      });
 
-      if (isValid) {
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 429) {
+        setErrorMsg(
+          isAr
+            ? "تم تجاوز عدد محاولات التحقق المسموح بها. يرجى الانتظار عدة دقائق قبل المحاولة مرة أخرى."
+            : "Too many failed attempts. Please wait a few minutes before trying again."
+        );
+        return;
+      }
+
+      if (res.ok && data.valid) {
+        unlockSessionAccess(code);
         onSuccessUnlock();
         onClose();
       } else {
         setErrorMsg(
-          isAr
-            ? "الكود غير صحيح أو انتهت صلاحيته (الكود صالح لمدة 5 دقائق فقط). يرجى التواصل مع فريق المبيعات للحصول على كود جديد."
-            : "Invalid or expired access code (codes expire after 5 minutes). Please contact sales to get a new code."
+          data.error ||
+            (isAr
+              ? "الكود غير صحيح أو انتهت صلاحيته (الكود صالح لمدة 5 دقائق فقط). يرجى التواصل مع فريق المبيعات للحصول على كود جديد."
+              : "Invalid or expired access code (codes expire after 5 minutes). Please contact sales to get a new code.")
         );
       }
-    }, 200);
+    } catch (err: any) {
+      setErrorMsg(
+        isAr
+          ? "حدث خطأ في الاتصال بالخادم. يرجى المحاولة لاحقاً."
+          : "Server connection failed. Please try again."
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

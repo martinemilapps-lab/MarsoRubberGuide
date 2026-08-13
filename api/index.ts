@@ -17,6 +17,27 @@ const currentDirname = typeof __dirname !== "undefined" ? __dirname : path.dirna
 const app = express();
 const PORT = 3000;
 
+// Production Environment Variables & Secrets
+const SESSION_SECRET = process.env.SESSION_SECRET || "marso_secure_session_secret_key_2026_xyz";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "marso_admin_2026";
+const ACCESS_CODE_SECRET = process.env.ACCESS_CODE_SECRET || "marso_access_code_secret_key_2026_xyz";
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || "";
+
+if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
+  if (!process.env.SESSION_SECRET) {
+    console.warn("[SECURITY WARNING] SESSION_SECRET environment variable is missing in production!");
+  }
+  if (!process.env.ADMIN_PASSWORD) {
+    console.warn("[SECURITY WARNING] ADMIN_PASSWORD environment variable is missing in production!");
+  }
+  if (!process.env.ACCESS_CODE_SECRET) {
+    console.warn("[SECURITY WARNING] ACCESS_CODE_SECRET environment variable is missing in production!");
+  }
+  if (!process.env.ALLOWED_ORIGINS) {
+    console.warn("[SECURITY WARNING] ALLOWED_ORIGINS environment variable is missing in production!");
+  }
+}
+
 // Security Headers Middleware
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -27,14 +48,44 @@ app.use((req, res, next) => {
   next();
 });
 
-// Strict CORS Middleware
+// Strict CORS Middleware with Allowlist
+const allowedOriginsList = ALLOWED_ORIGINS
+  .split(",")
+  .map(o => o.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+function isOriginAllowed(origin: string): boolean {
+  if (!origin) return true; // Same-origin or non-browser requests
+  const cleanOrigin = origin.trim().replace(/\/$/, "");
+
+  // Non-production local development fallback
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin)) {
+      return true;
+    }
+  }
+
+  // Exact allowlist check in production / Vercel
+  if (allowedOriginsList.length > 0) {
+    return allowedOriginsList.includes(cleanOrigin);
+  }
+
+  return false;
+}
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (isOriginAllowed(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Access-Code");
+    } else {
+      if (req.method === "OPTIONS") {
+        return res.status(403).json({ error: "Forbidden: Origin not in CORS allowlist." });
+      }
+    }
   }
   if (req.method === "OPTIONS") {
     return res.status(204).end();
@@ -150,6 +201,130 @@ const s3Client = (r2AccountId && r2AccessKeyId && r2SecretAccessKey) ? new S3Cli
     secretAccessKey: r2SecretAccessKey,
   },
 }) : null;
+
+// Refactored Trusted Remote Asset URL Validation Helper
+function isTrustedRemoteAssetUrl(urlStr: string): boolean {
+  if (!urlStr || typeof urlStr !== "string" || !r2PublicUrl) return false;
+  try {
+    const targetUrl = new URL(urlStr);
+    const publicUrl = new URL(r2PublicUrl);
+
+    if (targetUrl.protocol !== "https:") return false;
+
+    const host = targetUrl.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "169.254.169.254" ||
+      host.startsWith("192.168.") ||
+      host.startsWith("10.")
+    ) {
+      return false;
+    }
+
+    if (targetUrl.origin.toLowerCase() !== publicUrl.origin.toLowerCase()) {
+      return false;
+    }
+
+    const publicPath = publicUrl.pathname.replace(/\/$/, "");
+    if (publicPath && !targetUrl.pathname.startsWith(publicPath)) {
+      return false;
+    }
+
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Unified Asset & Payload Validation Helpers
+const MAX_ASSET_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB limit
+
+function parseDataUrl(value: string): { mimeType: string; buffer: Buffer } | null {
+  if (!value || typeof value !== "string" || !value.startsWith("data:")) return null;
+  const match = value.match(/^data:([a-zA-Z0-9-]+\/[a-zA-Z0-9-+.]+);base64,(.+)$/);
+  if (!match) return null;
+  try {
+    const mimeType = match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], "base64");
+    return { mimeType, buffer };
+  } catch (e) {
+    return null;
+  }
+}
+
+function isSafeKey(key: string): boolean {
+  if (!key || typeof key !== "string") return false;
+  if (key.includes("..") || key.startsWith("/") || key.startsWith("\\")) return false;
+  return /^[a-zA-Z0-9_.-]+(\/[a-zA-Z0-9_.-]+)*$/.test(key);
+}
+
+function validateAndCleanImageReference(value: any): string | null {
+  if (!value) return null;
+  if (typeof value !== "string") throw new Error("Image reference must be a string.");
+  const str = value.trim();
+  if (!str) return null;
+
+  if (str.startsWith("data:")) {
+    const parsed = parseDataUrl(str);
+    if (!parsed) throw new Error("Invalid image data URL format.");
+    const allowedMimes = ["image/webp", "image/png", "image/jpeg", "image/jpg"];
+    if (!allowedMimes.includes(parsed.mimeType)) {
+      throw new Error(`Unsupported image MIME type: ${parsed.mimeType}. Allowed: webp, png, jpeg.`);
+    }
+    if (parsed.buffer.length > MAX_ASSET_SIZE_BYTES) {
+      throw new Error("Image size exceeds maximum allowed limit of 8 MB.");
+    }
+    return str;
+  }
+
+  if (str.startsWith("http://") || str.startsWith("https://")) {
+    if (isTrustedRemoteAssetUrl(str)) return str;
+    try {
+      const parsedUrl = new URL(str);
+      if (parsedUrl.protocol === "https:" && parsedUrl.hostname.toLowerCase() === "images.unsplash.com") {
+        return str;
+      }
+    } catch (e) {}
+    throw new Error("Untrusted remote image URL origin.");
+  }
+
+  if (isSafeKey(str)) {
+    return str;
+  }
+
+  throw new Error("Invalid image file path or storage key.");
+}
+
+function validateAndCleanPdfReference(value: any): string | null {
+  if (!value) return null;
+  if (typeof value !== "string") throw new Error("PDF datasheet reference must be a string.");
+  const str = value.trim();
+  if (!str) return null;
+
+  if (str.startsWith("data:")) {
+    const parsed = parseDataUrl(str);
+    if (!parsed) throw new Error("Invalid PDF data URL format.");
+    if (parsed.mimeType !== "application/pdf") {
+      throw new Error(`Invalid datasheet MIME type: ${parsed.mimeType}. Only application/pdf is allowed.`);
+    }
+    if (parsed.buffer.length > MAX_ASSET_SIZE_BYTES) {
+      throw new Error("PDF datasheet size exceeds maximum allowed limit of 8 MB.");
+    }
+    return str;
+  }
+
+  if (str.startsWith("http://") || str.startsWith("https://")) {
+    if (isTrustedRemoteAssetUrl(str)) return str;
+    throw new Error("Untrusted remote PDF URL origin.");
+  }
+
+  if (isSafeKey(str)) {
+    return str;
+  }
+
+  throw new Error("Invalid PDF datasheet file path or storage key.");
+}
 
 async function uploadToR2(filename: string, buffer: Buffer, contentType: string): Promise<string> {
   const sanitized = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, "_")}`;
@@ -274,12 +449,21 @@ let cachedMarsoText: string | null = null;
 let cachedFormattedKnowledge: string | null = null;
 let cachedFormattedProductsRef: any[] | null = null;
 
+function getMarsoGuideDatabaseText(): string {
+  try {
+    const filePath = path.join(process.cwd(), "marsoGuide Database.txt");
+    if (fs.existsSync(filePath)) {
+      return fs.readFileSync(filePath, "utf-8");
+    }
+  } catch (e) {}
+  return "";
+}
+
 function getProductsKnowledgeFormatted(productsList: any[]): string {
   if (cachedFormattedKnowledge && cachedFormattedProductsRef === productsList) {
     return cachedFormattedKnowledge;
   }
 
-  // AI Knowledge Privacy Shield: Filter out system metadata rows and sensitive system items
   const cleanProducts = productsList.filter((p: any) => {
     if (!p || !p.id) return false;
     const idStr = String(p.id);
@@ -299,104 +483,75 @@ function getProductsKnowledgeFormatted(productsList: any[]): string {
     }
     return info;
   }).join("\n\n---\n\n");
+
   cachedFormattedKnowledge = formatted;
   cachedFormattedProductsRef = productsList;
   return formatted;
 }
 
-function getMarsoGuideDatabaseText(): string {
-  try {
-    const marsoGuidePath = path.join(process.cwd(), "marsoGuide Database.txt");
-    if (fs.existsSync(marsoGuidePath)) {
-      const content = fs.readFileSync(marsoGuidePath, "utf-8");
-      if (content && content.trim().length > 0) {
-        return content.trim();
-      }
-    }
-  } catch (err) {
-    console.error("[Marso Knowledge] Failed to read marsoGuide Database.txt:", err);
-  }
-  return "";
-}
-
-async function seedDatabaseIfEmpty() {
-  if (!tursoDb) return;
-  try {
-    await initTursoTables();
-    const countRes = await tursoDb.execute("SELECT COUNT(*) as cnt FROM products");
-    const count = Number(countRes.rows[0]?.cnt || 0);
-
-    if (count === 0 && Array.isArray(productsData) && productsData.length > 0) {
-      console.log("[Turso DB] Database is empty. Seeding initial products list...");
-      for (const p of productsData) {
-        await tursoDb.execute({
-          sql: `INSERT OR REPLACE INTO products (id, name, name_ar, category, photo, extra_photos, specs, datasheet_file, datasheet_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [
-            String(p.id),
-            p.name || "Unnamed Product",
-            p.nameAr || "",
-            p.category || "Reverse Engineering",
-            p.photo || "",
-            JSON.stringify([]),
-            JSON.stringify({
-              ...(p.specs || {}),
-              datasheetKnowledge: (p as any).datasheetKnowledge || (p.specs as any)?.datasheetKnowledge || null
-            }),
-            p.datasheetFile || null,
-            p.datasheetName || null
-          ]
-        });
-      }
-      console.log("[Turso DB] Successfully seeded initial products list.");
-    }
-  } catch (err) {
-    console.error("[Turso DB] Seeding check failed:", err);
-  }
-}
-
 async function revalidateProductsInBackground() {
-  if (isRevalidatingProducts || !tursoDb) return;
+  if (isRevalidatingProducts) return;
   isRevalidatingProducts = true;
   try {
+    if (!tursoDb) {
+      if (fs.existsSync(PRODUCTS_FILE_PATH)) {
+        const raw = fs.readFileSync(PRODUCTS_FILE_PATH, "utf-8");
+        cachedProducts = JSON.parse(raw);
+        lastFetchTime = Date.now();
+      }
+      return;
+    }
+
     await initTursoTables();
     if (!isSeeded) {
+      const countRes = await tursoDb.execute("SELECT count(*) as cnt FROM products");
+      const cnt = Number(countRes.rows[0]?.cnt || 0);
+      if (cnt === 0 && Array.isArray(productsData) && productsData.length > 0) {
+        for (const p of productsData) {
+          const specsJson = JSON.stringify(p.specs || {});
+          await tursoDb.execute({
+            sql: `INSERT OR REPLACE INTO products (id, name, name_ar, category, photo, extra_photos, specs, datasheet_file, datasheet_name)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              String(p.id),
+              String(p.name),
+              String(p.nameAr || ""),
+              String(p.category),
+              String(p.photo || ""),
+              JSON.stringify(p.extraPhotos || []),
+              specsJson,
+              p.datasheetFile || null,
+              p.datasheetName || null
+            ]
+          });
+        }
+      }
       isSeeded = true;
-      await seedDatabaseIfEmpty();
     }
 
     const res = await tursoDb.execute("SELECT * FROM products ORDER BY created_at DESC");
+    cachedProducts = res.rows.map((row: any) => {
+      let specs = {};
+      let extraPhotos = [];
+      try { specs = row.specs ? JSON.parse(String(row.specs)) : {}; } catch (e) {}
+      try { extraPhotos = row.extra_photos ? JSON.parse(String(row.extra_photos)) : []; } catch (e) {}
 
-    if (res.rows && res.rows.length > 0) {
-      const mapped = res.rows.map((row: any) => {
-        let extraPhotos = [];
-        let specs: any = {};
-        try { extraPhotos = row.extra_photos ? JSON.parse(String(row.extra_photos)) : []; } catch(e){}
-        try { specs = row.specs ? JSON.parse(String(row.specs)) : {}; } catch(e){}
-
-        return {
-          id: String(row.id),
-          name: String(row.name),
-          nameAr: String(row.name_ar || ""),
-          category: String(row.category),
-          photo: String(row.photo || ""),
-          extraPhotos: extraPhotos,
-          specs: specs,
-          datasheetFile: row.datasheet_file ? String(row.datasheet_file) : null,
-          datasheetName: row.datasheet_name ? String(row.datasheet_name) : null,
-          datasheetKnowledge: specs?.datasheetKnowledge || null
-        };
-      });
-
-      cachedProducts = mapped;
-      lastFetchTime = Date.now();
-
-      try {
-        fs.writeFileSync(PRODUCTS_FILE_PATH, JSON.stringify(mapped, null, 2), "utf-8");
-      } catch (e) {}
-    }
+      return {
+        id: String(row.id),
+        name: String(row.name),
+        nameAr: String(row.name_ar || ""),
+        category: String(row.category),
+        photo: String(row.photo || ""),
+        extraPhotos,
+        specs,
+        datasheetFile: row.datasheet_file ? String(row.datasheet_file) : null,
+        datasheetName: row.datasheet_name ? String(row.datasheet_name) : null,
+        datasheetKnowledge: specs ? (specs as any).datasheetKnowledge : null
+      };
+    });
+    lastFetchTime = Date.now();
   } catch (err) {
-    console.error("[Turso DB] Background revalidation error:", err);
+    console.error("[Turso DB] Error reading products:", err);
   } finally {
     isRevalidatingProducts = false;
   }
@@ -415,9 +570,7 @@ async function getStoredProducts(forceRefresh = false): Promise<any[]> {
   return cachedProducts || productsData;
 }
 
-const SESSION_SECRET = process.env.SESSION_SECRET || "marso_secure_session_secret_key_2026_xyz";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "marso_admin_2026";
-
+// Authentication & Rate Limiting System
 interface RateLimitEntry {
   attempts: number;
   blockedUntil: number;
@@ -524,6 +677,129 @@ function checkRoleAuth(allowedRoles: string[]) {
 const checkAdminAuth = checkRoleAuth(["admin"]);
 const checkEditorOrAdminAuth = checkRoleAuth(["admin", "editor"]);
 
+// Server-Side Datasheet Access Codes System
+interface ServerAccessCode {
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+}
+let activeServerAccessCodes: ServerAccessCode[] = [];
+
+function cleanExpiredAccessCodes() {
+  const now = Date.now();
+  activeServerAccessCodes = activeServerAccessCodes.filter(c => c.expiresAt > now);
+}
+
+// Access Code Verification Rate Limiter (10 failed attempts per 10 mins per IP)
+interface AccessCodeRateLimitEntry {
+  failedAttempts: number;
+  blockedUntil: number;
+}
+const accessCodeRateLimits = new Map<string, AccessCodeRateLimitEntry>();
+
+function isAccessCodeVerificationRateLimited(ip: string): boolean {
+  const entry = accessCodeRateLimits.get(ip);
+  if (!entry) return false;
+  if (Date.now() < entry.blockedUntil) return true;
+  accessCodeRateLimits.delete(ip);
+  return false;
+}
+
+function recordAccessCodeVerificationAttempt(ip: string, success: boolean) {
+  if (success) {
+    accessCodeRateLimits.delete(ip);
+    return;
+  }
+  const entry = accessCodeRateLimits.get(ip) || { failedAttempts: 0, blockedUntil: 0 };
+  entry.failedAttempts += 1;
+  if (entry.failedAttempts >= 10) {
+    entry.blockedUntil = Date.now() + 10 * 60 * 1000;
+  }
+  accessCodeRateLimits.set(ip, entry);
+}
+
+// Access Code Generation & Verification Endpoints
+app.post(["/api/access-code/generate", "/access-code/generate"], checkEditorOrAdminAuth, (req, res) => {
+  const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
+  cleanExpiredAccessCodes();
+
+  const codeInt = crypto.randomInt(1000, 10000);
+  const code = codeInt.toString();
+  const now = Date.now();
+  const expiresAt = now + 5 * 60 * 1000; // 5 Minutes validity
+
+  const newCodeObj: ServerAccessCode = { code, createdAt: now, expiresAt };
+  activeServerAccessCodes.unshift(newCodeObj);
+
+  logAuditEvent({
+    action: "ACCESS_CODE_GENERATE",
+    identity: (req as any).userRole || "admin",
+    role: (req as any).userRole || "admin",
+    ip: clientIp,
+    result: "SUCCESS"
+  });
+
+  res.json(newCodeObj);
+});
+
+app.post(["/api/access-code/verify", "/access-code/verify"], (req, res) => {
+  const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
+
+  if (isAccessCodeVerificationRateLimited(clientIp)) {
+    logAuditEvent({
+      action: "ACCESS_CODE_VERIFY",
+      identity: "anonymous",
+      ip: clientIp,
+      result: "DENIED",
+      details: "Rate limited for access code verification"
+    });
+    return res.status(429).json({ error: "Too many failed attempts. Please wait 10 minutes before trying again." });
+  }
+
+  const { code } = req.body;
+  if (!code || typeof code !== "string" || !/^\d{4}$/.test(code.trim())) {
+    recordAccessCodeVerificationAttempt(clientIp, false);
+    return res.status(400).json({ valid: false, error: "Access code must be a 4-digit numeric string." });
+  }
+
+  cleanExpiredAccessCodes();
+  const cleanCode = code.trim();
+  const now = Date.now();
+
+  let isValid = false;
+  for (const item of activeServerAccessCodes) {
+    if (item.expiresAt > now) {
+      try {
+        if (crypto.timingSafeEqual(Buffer.from(item.code), Buffer.from(cleanCode))) {
+          isValid = true;
+          break;
+        }
+      } catch (e) {}
+    }
+  }
+
+  if (isValid) {
+    recordAccessCodeVerificationAttempt(clientIp, true);
+    logAuditEvent({
+      action: "ACCESS_CODE_VERIFY",
+      identity: "customer",
+      ip: clientIp,
+      result: "SUCCESS"
+    });
+    return res.json({ valid: true });
+  } else {
+    recordAccessCodeVerificationAttempt(clientIp, false);
+    logAuditEvent({
+      action: "ACCESS_CODE_VERIFY",
+      identity: "customer",
+      ip: clientIp,
+      result: "FAILURE",
+      details: "Invalid or expired access code"
+    });
+    return res.json({ valid: false, error: "Invalid or expired access code (codes expire after 5 minutes)." });
+  }
+});
+
 let aiInstance: any = null;
 function getGeminiClient() {
   if (!aiInstance) {
@@ -616,37 +892,54 @@ if (!fs.existsSync(DATASHEETS_DIR)) {
   }
 }
 
-// Upload Endpoint (Cloudflare R2 or Direct Turso DB WebP Storage)
-app.post(["/api/upload", "/upload"], async (req, res) => {
+// Upload Endpoint (RBAC: Admin or Editor with Unified Asset Validation)
+app.post(["/api/upload", "/upload"], checkEditorOrAdminAuth, async (req, res) => {
   try {
     const { fileData, filename, contentType } = req.body;
     if (!fileData) {
       return res.status(400).json({ error: "fileData is required." });
     }
-    const cleanFilename = filename || `file_${Date.now()}`;
-    const type = contentType || (cleanFilename.endsWith(".pdf") ? "application/pdf" : "image/webp");
+
+    const isPdf = (contentType && contentType.includes("pdf")) || (filename && filename.endsWith(".pdf"));
+    let validatedAsset: string | null = null;
+    try {
+      if (isPdf) {
+        validatedAsset = validateAndCleanPdfReference(fileData);
+      } else {
+        validatedAsset = validateAndCleanImageReference(fileData);
+      }
+    } catch (valErr: any) {
+      return res.status(400).json({ error: valErr.message || "Invalid asset payload." });
+    }
+
+    if (!validatedAsset) {
+      return res.status(400).json({ error: "Invalid asset reference provided." });
+    }
+
+    const cleanFilename = filename ? String(filename).replace(/[^a-zA-Z0-9.-]/g, "_") : `file_${Date.now()}`;
+    const type = contentType || (isPdf ? "application/pdf" : "image/webp");
 
     if (s3Client) {
       try {
         let buffer: Buffer;
-        if (fileData.startsWith("data:")) {
-          const base64Str = fileData.split(",")[1] || fileData;
-          buffer = Buffer.from(base64Str, "base64");
+        if (validatedAsset.startsWith("data:")) {
+          const parsed = parseDataUrl(validatedAsset);
+          if (!parsed) return res.status(400).json({ error: "Malformed data URL payload." });
+          buffer = parsed.buffer;
         } else {
-          buffer = Buffer.from(fileData, "base64");
+          buffer = Buffer.from(validatedAsset, "base64");
         }
         const publicUrl = await uploadToR2(cleanFilename, buffer, type);
         return res.json({ url: publicUrl, key: publicUrl });
       } catch (uploadErr) {
-        console.warn("[R2 Upload Warning] R2 upload failed, falling back to Turso direct storage:", uploadErr);
+        console.warn("[R2 Upload Warning] R2 upload failed, using validated fallback:", uploadErr);
       }
     }
 
-    // Direct Turso DB Storage (Option A)
-    res.json({ url: fileData, key: fileData });
+    return res.json({ url: validatedAsset, key: validatedAsset });
   } catch (err: any) {
     console.error("[Upload Endpoint Error]", err);
-    res.json({ url: req.body?.fileData || "", key: req.body?.fileData || "" });
+    return res.status(500).json({ error: "Failed to upload asset." });
   }
 });
 
@@ -786,6 +1079,9 @@ app.post(["/api/categories", "/categories"], checkAdminAuth, async (req, res) =>
       return res.status(400).json({ error: "Category name is required." });
     }
     const cleanName = name.trim();
+    if (cleanName.length > 100) {
+      return res.status(400).json({ error: "Category name exceeds 100 characters." });
+    }
     let categories = await getStoredCategories();
     if (!categories.some(c => c.toLowerCase() === cleanName.toLowerCase())) {
       categories.push(cleanName);
@@ -806,6 +1102,9 @@ app.put(["/api/categories", "/categories"], checkAdminAuth, async (req, res) => 
     }
     const cleanOld = oldName.trim();
     const cleanNew = newName.trim();
+    if (cleanNew.length > 100) {
+      return res.status(400).json({ error: "New category name exceeds 100 characters." });
+    }
 
     let categories = await getStoredCategories();
     categories = categories.map(c => (c === cleanOld ? cleanNew : c));
@@ -853,6 +1152,64 @@ app.post(["/api/categories/clear-unused", "/categories/clear-unused"], checkAdmi
 
 // Products CRUD Endpoints
 
+function sanitizeProductPayload(body: any): any {
+  if (!body || typeof body !== "object") {
+    throw new Error("Invalid product payload.");
+  }
+
+  const name = String(body.name || "Unnamed Product").trim();
+  if (name.length > 150) throw new Error("Product name exceeds 150 characters.");
+
+  const nameAr = String(body.nameAr || "").trim();
+  if (nameAr.length > 150) throw new Error("Product Arabic name exceeds 150 characters.");
+
+  const category = String(body.category || "Reverse Engineering").trim();
+  if (category.length > 100) throw new Error("Product category exceeds 100 characters.");
+
+  const rawPhoto = body.photo || "https://images.unsplash.com/photo-1590069261209-f8e9b8642343?auto=format&fit=crop&q=80&w=400";
+  const photo = validateAndCleanImageReference(rawPhoto) || "https://images.unsplash.com/photo-1590069261209-f8e9b8642343?auto=format&fit=crop&q=80&w=400";
+
+  const rawDatasheet = body.datasheetFile || null;
+  const datasheetFile = validateAndCleanPdfReference(rawDatasheet);
+
+  let datasheetName = body.datasheetName ? String(body.datasheetName).trim() : null;
+  if (datasheetName && datasheetName.length > 255) {
+    datasheetName = datasheetName.substring(0, 255);
+  }
+
+  const rawKnowledge = body.datasheetKnowledge || body.specs?.datasheetKnowledge || null;
+  let datasheetKnowledge = rawKnowledge ? String(rawKnowledge).trim() : null;
+  if (datasheetKnowledge && datasheetKnowledge.length > 10000) {
+    datasheetKnowledge = datasheetKnowledge.substring(0, 10000);
+  }
+
+  const specs = body.specs || {};
+  const specsObj = {
+    code: String(specs.code || "").trim().substring(0, 100),
+    sizeDims: String(specs.sizeDims || "").trim().substring(0, 500),
+    weight: String(specs.weight || "").trim().substring(0, 300),
+    features: String(specs.features || "").trim().substring(0, 1500),
+    physicalSpecs: String(specs.physicalSpecs || "").trim().substring(0, 1500),
+    material: String(specs.material || "").trim().substring(0, 500),
+    color: String(specs.color || "").trim().substring(0, 200),
+    application: String(specs.application || "").trim().substring(0, 1000),
+    price: String(specs.price || body.price || "").trim().substring(0, 100),
+    priceCurrency: String(specs.priceCurrency || body.priceCurrency || "EGP").trim().substring(0, 10),
+    datasheetKnowledge
+  };
+
+  return {
+    name,
+    nameAr,
+    category,
+    photo,
+    datasheetFile,
+    datasheetName,
+    datasheetKnowledge,
+    specs: specsObj
+  };
+}
+
 // 1. Get all products
 app.get(["/api/products", "/products"], async (req, res) => {
   try {
@@ -878,60 +1235,42 @@ app.get(["/api/products", "/products"], async (req, res) => {
 app.post(["/api/products", "/products"], checkEditorOrAdminAuth, async (req, res) => {
   try {
     await initTursoTables();
+    const sanitized = sanitizeProductPayload(req.body);
     const newId = req.body.id ? String(req.body.id) : String(Date.now());
-    let datasheetFile = req.body.datasheetFile || null;
-    const datasheetName = req.body.datasheetName || null;
 
-    if (req.body.category && typeof req.body.category === "string") {
-      const currentCats = await getStoredCategories();
-      if (!currentCats.some(c => c.toLowerCase() === req.body.category.trim().toLowerCase())) {
-        currentCats.push(req.body.category.trim());
-        await saveStoredCategories(currentCats);
-      }
+    const currentCats = await getStoredCategories();
+    if (!currentCats.some(c => c.toLowerCase() === sanitized.category.toLowerCase())) {
+      currentCats.push(sanitized.category);
+      await saveStoredCategories(currentCats);
     }
-
-    const datasheetKnowledgeVal = req.body.datasheetKnowledge || req.body.specs?.datasheetKnowledge || null;
-    const specsObj = {
-      code: req.body.specs?.code || "",
-      sizeDims: req.body.specs?.sizeDims || "",
-      weight: req.body.specs?.weight || "",
-      features: req.body.specs?.features || "",
-      physicalSpecs: req.body.specs?.physicalSpecs || "",
-      material: req.body.specs?.material || "",
-      color: req.body.specs?.color || "",
-      application: req.body.specs?.application || "",
-      price: req.body.specs?.price || req.body.price || "",
-      priceCurrency: req.body.specs?.priceCurrency || req.body.priceCurrency || "EGP",
-      datasheetKnowledge: datasheetKnowledgeVal
-    };
 
     await tursoDb.execute({
       sql: `INSERT OR REPLACE INTO products (id, name, name_ar, category, photo, extra_photos, specs, datasheet_file, datasheet_name)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         newId,
-        req.body.name || "Unnamed Product",
-        req.body.nameAr || "",
-        req.body.category || "Reverse Engineering",
-        req.body.photo || "https://images.unsplash.com/photo-1590069261209-f8e9b8642343?auto=format&fit=crop&q=80&w=400",
+        sanitized.name,
+        sanitized.nameAr,
+        sanitized.category,
+        sanitized.photo,
         JSON.stringify([]),
-        JSON.stringify(specsObj),
-        datasheetFile,
-        datasheetName
+        JSON.stringify(sanitized.specs),
+        sanitized.datasheetFile,
+        sanitized.datasheetName
       ]
     });
 
     const mapped = {
       id: newId,
-      name: req.body.name || "Unnamed Product",
-      nameAr: req.body.nameAr || "",
-      category: req.body.category || "Reverse Engineering",
-      photo: req.body.photo || "https://images.unsplash.com/photo-1590069261209-f8e9b8642343?auto=format&fit=crop&q=80&w=400",
+      name: sanitized.name,
+      nameAr: sanitized.nameAr,
+      category: sanitized.category,
+      photo: sanitized.photo,
       extraPhotos: [],
-      specs: specsObj,
-      datasheetFile: datasheetFile,
-      datasheetName: datasheetName,
-      datasheetKnowledge: datasheetKnowledgeVal
+      specs: sanitized.specs,
+      datasheetFile: sanitized.datasheetFile,
+      datasheetName: sanitized.datasheetName,
+      datasheetKnowledge: sanitized.datasheetKnowledge
     };
 
     if (cachedProducts) {
@@ -944,7 +1283,7 @@ app.post(["/api/products", "/products"], checkEditorOrAdminAuth, async (req, res
     res.status(201).json(mapped);
   } catch (err: any) {
     console.error("Failed to create product:", err);
-    res.status(500).json({ error: err.message || "Failed to create product." });
+    res.status(400).json({ error: err.message || "Failed to create product." });
   }
 });
 
@@ -967,56 +1306,57 @@ app.put(["/api/products/:id", "/products/:id"], checkEditorOrAdminAuth, async (r
     let existingSpecs: any = {};
     try { existingSpecs = existingRow.specs ? JSON.parse(String(existingRow.specs)) : {}; } catch(e){}
 
-    const datasheetFile = req.body.datasheetFile !== undefined ? req.body.datasheetFile : existingRow.datasheet_file;
-    const datasheetName = req.body.datasheetName !== undefined ? req.body.datasheetName : existingRow.datasheet_name;
-    const datasheetKnowledgeVal = req.body.datasheetKnowledge !== undefined ? req.body.datasheetKnowledge : (existingSpecs.datasheetKnowledge ?? null);
-
-    const updatedSpecs = {
-      code: req.body.specs?.code ?? existingSpecs.code ?? "",
-      sizeDims: req.body.specs?.sizeDims ?? existingSpecs.sizeDims ?? "",
-      weight: req.body.specs?.weight ?? existingSpecs.weight ?? "",
-      features: req.body.specs?.features ?? existingSpecs.features ?? "",
-      physicalSpecs: req.body.specs?.physicalSpecs ?? existingSpecs.physicalSpecs ?? "",
-      material: req.body.specs?.material ?? existingSpecs.material ?? "",
-      color: req.body.specs?.color ?? existingSpecs.color ?? "",
-      application: req.body.specs?.application ?? existingSpecs.application ?? "",
-      price: req.body.specs?.price ?? req.body.price ?? existingSpecs.price ?? "",
-      priceCurrency: req.body.specs?.priceCurrency ?? req.body.priceCurrency ?? existingSpecs.priceCurrency ?? "EGP",
-      datasheetKnowledge: datasheetKnowledgeVal
+    const mergedPayload = {
+      name: req.body.name !== undefined ? req.body.name : String(existingRow.name),
+      nameAr: req.body.nameAr !== undefined ? req.body.nameAr : String(existingRow.name_ar || ""),
+      category: req.body.category !== undefined ? req.body.category : String(existingRow.category),
+      photo: req.body.photo !== undefined ? req.body.photo : String(existingRow.photo || ""),
+      datasheetFile: req.body.datasheetFile !== undefined ? req.body.datasheetFile : existingRow.datasheet_file,
+      datasheetName: req.body.datasheetName !== undefined ? req.body.datasheetName : existingRow.datasheet_name,
+      datasheetKnowledge: req.body.datasheetKnowledge !== undefined ? req.body.datasheetKnowledge : (existingSpecs.datasheetKnowledge ?? null),
+      specs: {
+        code: req.body.specs?.code ?? existingSpecs.code ?? "",
+        sizeDims: req.body.specs?.sizeDims ?? existingSpecs.sizeDims ?? "",
+        weight: req.body.specs?.weight ?? existingSpecs.weight ?? "",
+        features: req.body.specs?.features ?? existingSpecs.features ?? "",
+        physicalSpecs: req.body.specs?.physicalSpecs ?? existingSpecs.physicalSpecs ?? "",
+        material: req.body.specs?.material ?? existingSpecs.material ?? "",
+        color: req.body.specs?.color ?? existingSpecs.color ?? "",
+        application: req.body.specs?.application ?? existingSpecs.application ?? "",
+        price: req.body.specs?.price ?? req.body.price ?? existingSpecs.price ?? "",
+        priceCurrency: req.body.specs?.priceCurrency ?? req.body.priceCurrency ?? existingSpecs.priceCurrency ?? "EGP",
+      }
     };
 
-    const updatedName = req.body.name ?? String(existingRow.name);
-    const updatedNameAr = req.body.nameAr ?? String(existingRow.name_ar || "");
-    const updatedCategory = req.body.category ?? String(existingRow.category);
-    const updatedPhoto = req.body.photo ?? String(existingRow.photo || "");
+    const sanitized = sanitizeProductPayload(mergedPayload);
     const updatedExtraPhotos: string[] = [];
 
     await tursoDb.execute({
       sql: `UPDATE products SET name = ?, name_ar = ?, category = ?, photo = ?, extra_photos = ?, specs = ?, datasheet_file = ?, datasheet_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       args: [
-        updatedName,
-        updatedNameAr,
-        updatedCategory,
-        updatedPhoto,
+        sanitized.name,
+        sanitized.nameAr,
+        sanitized.category,
+        sanitized.photo,
         JSON.stringify(updatedExtraPhotos),
-        JSON.stringify(updatedSpecs),
-        datasheetFile,
-        datasheetName,
+        JSON.stringify(sanitized.specs),
+        sanitized.datasheetFile,
+        sanitized.datasheetName,
         id
       ]
     });
 
     const mappedUpdated = {
       id: id,
-      name: updatedName,
-      nameAr: updatedNameAr,
-      category: updatedCategory,
-      photo: updatedPhoto,
+      name: sanitized.name,
+      nameAr: sanitized.nameAr,
+      category: sanitized.category,
+      photo: sanitized.photo,
       extraPhotos: updatedExtraPhotos,
-      specs: updatedSpecs,
-      datasheetFile: datasheetFile,
-      datasheetName: datasheetName,
-      datasheetKnowledge: datasheetKnowledgeVal
+      specs: sanitized.specs,
+      datasheetFile: sanitized.datasheetFile,
+      datasheetName: sanitized.datasheetName,
+      datasheetKnowledge: sanitized.datasheetKnowledge
     };
 
     if (cachedProducts) {
@@ -1029,11 +1369,11 @@ app.put(["/api/products/:id", "/products/:id"], checkEditorOrAdminAuth, async (r
     res.json(mappedUpdated);
   } catch (err: any) {
     console.error("Failed to update product:", err);
-    res.status(500).json({ error: err.message || "Failed to update product." });
+    res.status(400).json({ error: err.message || "Failed to update product." });
   }
 });
 
-// 4. Delete a product
+// 4. Delete a product (RBAC: Admin Only)
 app.delete(["/api/products/:id", "/products/:id"], checkAdminAuth, async (req, res) => {
   try {
     await initTursoTables();
@@ -1077,9 +1417,58 @@ app.delete(["/api/products/:id", "/products/:id"], checkAdminAuth, async (req, r
   }
 });
 
-// 5. Download Product Datasheet
+// 5. Download Product Datasheet (Protected by Admin Auth OR Server Access Code)
 app.get(["/api/products/:id/datasheet", "/products/:id/datasheet"], async (req, res) => {
   try {
+    const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
+
+    // Authorization check: either valid admin/editor Bearer token OR valid server-generated access code
+    let isAuthorized = false;
+
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+    const { valid: tokenValid } = verifyUserTokenRole(token);
+    if (tokenValid) {
+      isAuthorized = true;
+    }
+
+    if (!isAuthorized) {
+      const codeParam = (req.headers["x-access-code"] as string) || (req.query.accessCode as string);
+      if (codeParam && typeof codeParam === "string" && /^\d{4}$/.test(codeParam.trim())) {
+        if (isAccessCodeVerificationRateLimited(clientIp)) {
+          return res.status(429).json({ error: "Too many failed verification attempts. Please wait 10 minutes." });
+        }
+        cleanExpiredAccessCodes();
+        const cleanCode = codeParam.trim();
+        const now = Date.now();
+        for (const item of activeServerAccessCodes) {
+          if (item.expiresAt > now) {
+            try {
+              if (crypto.timingSafeEqual(Buffer.from(item.code), Buffer.from(cleanCode))) {
+                isAuthorized = true;
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+        if (!isAuthorized) {
+          recordAccessCodeVerificationAttempt(clientIp, false);
+        }
+      }
+    }
+
+    if (!isAuthorized) {
+      logAuditEvent({
+        action: "DATASHEET_DOWNLOAD",
+        identity: "anonymous",
+        ip: clientIp,
+        resource: req.originalUrl,
+        result: "DENIED",
+        details: "Unauthorized datasheet download attempt"
+      });
+      return res.status(401).json({ error: "Unauthorized: Valid access code or admin authorization required to download technical datasheets." });
+    }
+
     await initTursoTables();
     const { id } = req.params;
     if (!id || typeof id !== "string") {
@@ -1104,15 +1493,21 @@ app.get(["/api/products/:id/datasheet", "/products/:id/datasheet"], async (req, 
 
     let buffer: Buffer;
     if (datasheetPath.startsWith("http://") || datasheetPath.startsWith("https://")) {
-      const response = await fetch(datasheetPath);
+      if (!isTrustedRemoteAssetUrl(datasheetPath)) {
+        return res.status(400).json({ error: "Remote datasheet URL origin is not trusted." });
+      }
+      const response = await fetch(datasheetPath, { signal: AbortSignal.timeout(10000) });
       if (!response.ok) {
         return res.status(404).json({ error: "Failed to download datasheet from cloud URL." });
       }
       const arrayBuffer = await response.arrayBuffer();
       buffer = Buffer.from(arrayBuffer);
     } else if (datasheetPath.startsWith("data:")) {
-      const base64Str = datasheetPath.split(",")[1] || datasheetPath;
-      buffer = Buffer.from(base64Str, "base64");
+      const parsed = parseDataUrl(datasheetPath);
+      if (!parsed || parsed.mimeType !== "application/pdf") {
+        return res.status(400).json({ error: "Invalid PDF datasheet format." });
+      }
+      buffer = parsed.buffer;
     } else if (s3Client) {
       try {
         const getCmd = new GetObjectCommand({
@@ -1136,33 +1531,64 @@ app.get(["/api/products/:id/datasheet", "/products/:id/datasheet"], async (req, 
     res.send(buffer);
   } catch (err: any) {
     console.error("Error handling datasheet download:", err);
-    res.status(500).json({ error: err.message || "Internal server error during datasheet download." });
+    res.status(500).json({ error: "Internal server error during datasheet download." });
   }
 });
 
-// 6. Upload and AI Extract Specs from PDF Datasheet
+// 6. Upload and AI Extract Specs from PDF Datasheet (RBAC: Admin Only)
 app.post(["/api/datasheets/upload-and-extract", "/datasheets/upload-and-extract"], checkAdminAuth, async (req, res) => {
   try {
     const { datasheetFile, filename } = req.body;
     if (!datasheetFile) {
-      return res.status(400).json({ error: "datasheetFile is required to perform operation" });
+      return res.status(400).json({ error: "datasheetFile is required." });
     }
 
-    const originalName = filename || "datasheet.pdf";
+    let validatedPdfRef: string | null = null;
+    try {
+      validatedPdfRef = validateAndCleanPdfReference(datasheetFile);
+    } catch (valErr: any) {
+      return res.status(400).json({ error: valErr.message || "Invalid PDF datasheet payload." });
+    }
+
+    if (!validatedPdfRef) {
+      return res.status(400).json({ error: "Invalid PDF datasheet reference." });
+    }
+
+    const originalName = filename ? String(filename).replace(/[^a-zA-Z0-9.-]/g, "_").substring(0, 255) : "datasheet.pdf";
     let cleanBase64 = "";
 
-    if (datasheetFile.startsWith("http://") || datasheetFile.startsWith("https://")) {
-      const response = await fetch(datasheetFile);
+    if (validatedPdfRef.startsWith("http://") || validatedPdfRef.startsWith("https://")) {
+      if (!isTrustedRemoteAssetUrl(validatedPdfRef)) {
+        return res.status(400).json({ error: "Remote PDF URL is not from a trusted R2 origin." });
+      }
+      const response = await fetch(validatedPdfRef, { signal: AbortSignal.timeout(10000) });
       if (!response.ok) {
-        return res.status(404).json({ error: "Failed to fetch uploaded PDF from R2 URL." });
+        return res.status(404).json({ error: "Failed to fetch PDF from trusted R2 URL." });
+      }
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType && !contentType.includes("pdf") && !contentType.includes("octet-stream")) {
+        return res.status(400).json({ error: "Remote response content-type is not a valid PDF." });
+      }
+      const contentLengthStr = response.headers.get("content-length");
+      if (contentLengthStr && parseInt(contentLengthStr, 10) > MAX_ASSET_SIZE_BYTES) {
+        return res.status(413).json({ error: "PDF datasheet exceeds maximum allowed size limit of 8 MB." });
       }
       const arrayBuffer = await response.arrayBuffer();
+      if (arrayBuffer.byteLength > MAX_ASSET_SIZE_BYTES) {
+        return res.status(413).json({ error: "PDF datasheet exceeds maximum allowed size limit of 8 MB." });
+      }
       cleanBase64 = Buffer.from(arrayBuffer).toString("base64");
-    } else if (datasheetFile.startsWith("data:")) {
-      const match = datasheetFile.match(/^data:application\/pdf;base64,(.*)$/);
-      cleanBase64 = match ? match[1] : datasheetFile.split(",")[1];
+    } else if (validatedPdfRef.startsWith("data:")) {
+      const parsed = parseDataUrl(validatedPdfRef);
+      if (!parsed || parsed.mimeType !== "application/pdf") {
+        return res.status(400).json({ error: "Invalid PDF data URL or unsupported MIME type." });
+      }
+      if (parsed.buffer.length > MAX_ASSET_SIZE_BYTES) {
+        return res.status(413).json({ error: "PDF datasheet exceeds maximum allowed size limit of 8 MB." });
+      }
+      cleanBase64 = parsed.buffer.toString("base64");
     } else {
-      cleanBase64 = datasheetFile;
+      cleanBase64 = validatedPdfRef;
     }
 
     let ai;
@@ -1170,7 +1596,7 @@ app.post(["/api/datasheets/upload-and-extract", "/datasheets/upload-and-extract"
       ai = getGeminiClient();
     } catch (keyErr: any) {
       console.error("Gemini client initialization failed for upload-and-extract:", keyErr);
-      return res.status(500).json({ error: keyErr.message || "Failed to initialize Gemini client." });
+      return res.status(500).json({ error: "Failed to initialize Gemini client." });
     }
 
     const pdfPart = {
@@ -1247,14 +1673,14 @@ Keep values highly accurate but extremely concise (maximum 12 words per property
 
     res.json({
       specs: parsedSpecs,
-      datasheetFile: datasheetFile,
+      datasheetFile: validatedPdfRef,
       datasheetName: originalName,
       datasheetKnowledge: datasheetKnowledgeSummary
     });
 
   } catch (err: any) {
     console.error("Failed to upload and extract PDF datasheet:", err);
-    res.status(500).json({ error: err.message || "Failed to process PDF datasheet." });
+    res.status(500).json({ error: "Failed to process PDF datasheet." });
   }
 });
 
@@ -1275,7 +1701,6 @@ function isChatRateLimited(ip: string, isAuth: boolean): boolean {
     chatRateLimits.set(ip, entry);
   }
 
-  // Filter out timestamps older than window
   entry.timestamps = entry.timestamps.filter(ts => now - ts < windowMs);
 
   if (entry.timestamps.length >= maxRequests) {
@@ -1313,7 +1738,6 @@ app.post(["/api/chat", "/chat"], async (req, res) => {
       return res.status(400).json({ error: "Message is required and must be a non-empty string." });
     }
 
-    // Maximum message length limit: 2,000 characters
     if (message.length > 2000) {
       return res.status(400).json({ error: "Message length exceeds maximum allowed limit of 2,000 characters." });
     }
@@ -1323,7 +1747,6 @@ app.post(["/api/chat", "/chat"], async (req, res) => {
       if (!Array.isArray(history)) {
         return res.status(400).json({ error: "History must be an array of message objects." });
       }
-      // Maximum history items: 10 items
       if (history.length > 10) {
         sanitizedHistory = history.slice(-10);
       } else {

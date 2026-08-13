@@ -52,7 +52,7 @@ import ContactCardModal from "./components/ContactCardModal";
 import AccessCodeModal from "./components/AccessCodeModal";
 import AdminCodeGeneratorModal from "./components/AdminCodeGeneratorModal";
 import { AnimatedBackground } from "./components/AnimatedBackground";
-import { isSessionUnlocked } from "./lib/accessCode";
+import { isSessionUnlocked, getSessionAccessCode } from "./lib/accessCode";
 
 const INITIAL_SEED_PRODUCTS = productsDataJson as unknown as Product[];
 
@@ -641,8 +641,9 @@ export default function App() {
   // Automated localized mechanical drawings specs downloading
   const performDownloadSpec = (prod: Product) => {
     if (prod.datasheetFile) {
+      const code = getSessionAccessCode();
       const link = document.createElement("a");
-      link.href = `/api/products/${prod.id}/datasheet`;
+      link.href = `/api/products/${prod.id}/datasheet${code ? `?accessCode=${encodeURIComponent(code)}` : ""}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
