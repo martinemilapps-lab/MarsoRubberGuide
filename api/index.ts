@@ -17,8 +17,52 @@ const currentDirname = typeof __dirname !== "undefined" ? __dirname : path.dirna
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb", extended: true }));
+// Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  next();
+});
+
+// Strict CORS Middleware
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// Restricted payload limits (Default 64 KB for standard requests)
+app.use(express.json({ limit: "64kb" }));
+app.use(express.urlencoded({ limit: "64kb", extended: true }));
+
+// Structured Audit Logging Architecture
+interface AuditLogEvent {
+  action: string;
+  identity: string;
+  role?: string;
+  ip: string;
+  resource?: string;
+  result: "SUCCESS" | "FAILURE" | "DENIED";
+  details?: string;
+}
+
+function logAuditEvent(event: AuditLogEvent) {
+  const timestamp = new Date().toISOString();
+  console.log(
+    `[AUDIT LOG] [${timestamp}] Action: ${event.action} | Identity: ${event.identity} | Role: ${event.role || "anonymous"} | IP: ${event.ip} | Resource: ${event.resource || "N/A"} | Result: ${event.result}${event.details ? ` | Details: ${event.details}` : ""}`
+  );
+}
 
 const PRODUCTS_FILE_PATH = process.env.VERCEL 
   ? path.join("/tmp", "products.json") 
@@ -411,7 +455,6 @@ function generateUserRoleToken(role: string = "admin"): { token: string; expires
 
 function verifyUserTokenRole(token: string | null): { valid: boolean; role: string | null } {
   if (!token) return { valid: false, role: null };
-  if (token === "marso_admin_token_2026") return { valid: true, role: "admin" };
   const parts = token.split(":");
   if (parts.length !== 3) return { valid: false, role: null };
   const [role, expiresAtStr, hmac] = parts;
@@ -431,19 +474,45 @@ function verifyUserTokenRole(token: string | null): { valid: boolean; role: stri
 
 function checkRoleAuth(allowedRoles: string[]) {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
     const authHeader = req.headers.authorization;
     const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
 
     if (!token) {
+      logAuditEvent({
+        action: "AUTH_CHECK",
+        identity: "anonymous",
+        ip: clientIp,
+        resource: req.originalUrl,
+        result: "DENIED",
+        details: "Missing authentication token"
+      });
       return res.status(401).json({ error: "Unauthorized: Missing authentication token." });
     }
 
     const { valid, role } = verifyUserTokenRole(token);
     if (!valid || !role) {
+      logAuditEvent({
+        action: "AUTH_CHECK",
+        identity: "unauthenticated",
+        ip: clientIp,
+        resource: req.originalUrl,
+        result: "DENIED",
+        details: "Invalid or expired token"
+      });
       return res.status(401).json({ error: "Unauthorized: Invalid or expired token." });
     }
 
     if (!allowedRoles.includes(role)) {
+      logAuditEvent({
+        action: "AUTH_CHECK",
+        identity: role,
+        role: role,
+        ip: clientIp,
+        resource: req.originalUrl,
+        result: "DENIED",
+        details: `Role '${role}' lacks permission`
+      });
       return res.status(403).json({ error: `Forbidden: Role '${role}' lacks permission for this resource.` });
     }
 
@@ -587,28 +656,73 @@ app.post(["/api/admin/login", "/admin/login"], (req, res) => {
   const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
 
   if (isRateLimited(clientIp)) {
+    logAuditEvent({
+      action: "ADMIN_LOGIN",
+      identity: req.body?.email || "unknown",
+      ip: clientIp,
+      result: "DENIED",
+      details: "Rate limited / account locked"
+    });
     return res.status(429).json({ error: "Too many failed attempts. Account locked for 15 minutes." });
   }
 
-  const { password } = req.body;
+  const { password, email } = req.body;
   if (!password || typeof password !== "string") {
     recordLoginAttempt(clientIp, false);
+    logAuditEvent({
+      action: "ADMIN_LOGIN",
+      identity: email || "unknown",
+      ip: clientIp,
+      result: "FAILURE",
+      details: "Missing password"
+    });
     return res.status(400).json({ error: "Password is required." });
   }
 
   if (password === ADMIN_PASSWORD) {
     recordLoginAttempt(clientIp, true);
     const { token, expiresAt, role } = generateUserRoleToken("admin");
+    logAuditEvent({
+      action: "ADMIN_LOGIN",
+      identity: email || "admin@marso-egy.com",
+      role: role,
+      ip: clientIp,
+      result: "SUCCESS"
+    });
     return res.json({ success: true, token, expiresAt, role });
   } else {
     recordLoginAttempt(clientIp, false);
     const entry = loginAttempts.get(clientIp);
     const remaining = entry ? Math.max(0, 5 - entry.attempts) : 4;
+    logAuditEvent({
+      action: "ADMIN_LOGIN",
+      identity: email || "unknown",
+      ip: clientIp,
+      result: "FAILURE",
+      details: `Incorrect password. ${remaining} attempts remaining.`
+    });
     return res.status(401).json({
       error: `Incorrect admin password. ${remaining} attempts remaining before lockout.`,
       remainingAttempts: remaining
     });
   }
+});
+
+app.post(["/api/admin/logout", "/admin/logout"], (req, res) => {
+  const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+  const { role } = verifyUserTokenRole(token);
+
+  logAuditEvent({
+    action: "ADMIN_LOGOUT",
+    identity: role || "admin",
+    role: role || undefined,
+    ip: clientIp,
+    result: "SUCCESS"
+  });
+
+  return res.json({ success: true, message: "Logged out successfully." });
 });
 
 app.get(["/api/admin/verify", "/admin/verify"], async (req, res) => {
@@ -1144,21 +1258,80 @@ Keep values highly accurate but extremely concise (maximum 12 words per property
   }
 });
 
+// Rate limiting tracking for AI chat
+interface ChatRateLimitEntry {
+  timestamps: number[];
+}
+const chatRateLimits = new Map<string, ChatRateLimitEntry>();
+
+function isChatRateLimited(ip: string, isAuth: boolean): boolean {
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000; // 1 hour window
+  const maxRequests = isAuth ? 100 : 20;
+
+  let entry = chatRateLimits.get(ip);
+  if (!entry) {
+    entry = { timestamps: [] };
+    chatRateLimits.set(ip, entry);
+  }
+
+  // Filter out timestamps older than window
+  entry.timestamps = entry.timestamps.filter(ts => now - ts < windowMs);
+
+  if (entry.timestamps.length >= maxRequests) {
+    return true;
+  }
+
+  entry.timestamps.push(now);
+  return false;
+}
+
 // Chat assistant using Gemini
 app.post(["/api/chat", "/chat"], async (req, res) => {
   try {
+    const clientIp = (req.headers["x-forwarded-for"] as string || req.ip || "unknown").split(",")[0].trim();
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+    const { valid } = verifyUserTokenRole(token);
+
+    if (isChatRateLimited(clientIp, valid)) {
+      logAuditEvent({
+        action: "AI_CHAT",
+        identity: valid ? "authenticated" : "anonymous",
+        ip: clientIp,
+        result: "DENIED",
+        details: "Chat rate limit exceeded"
+      });
+      return res.status(429).json({
+        error: "Rate limit exceeded. Maximum chat requests reached for this window."
+      });
+    }
+
     const { message, history } = req.body;
     
     if (!message || typeof message !== "string" || message.trim() === "") {
       return res.status(400).json({ error: "Message is required and must be a non-empty string." });
     }
 
+    // Maximum message length limit: 2,000 characters
+    if (message.length > 2000) {
+      return res.status(400).json({ error: "Message length exceeds maximum allowed limit of 2,000 characters." });
+    }
+
+    let sanitizedHistory: any[] = [];
     if (history !== undefined) {
       if (!Array.isArray(history)) {
         return res.status(400).json({ error: "History must be an array of message objects." });
       }
-      for (let i = 0; i < history.length; i++) {
-        const item = history[i];
+      // Maximum history items: 10 items
+      if (history.length > 10) {
+        sanitizedHistory = history.slice(-10);
+      } else {
+        sanitizedHistory = history;
+      }
+
+      for (let i = 0; i < sanitizedHistory.length; i++) {
+        const item = sanitizedHistory[i];
         if (!item || typeof item !== "object") {
           return res.status(400).json({ error: `History item at index ${i} must be an object.` });
         }
@@ -1168,6 +1341,9 @@ app.post(["/api/chat", "/chat"], async (req, res) => {
         if (typeof item.content !== "string" || item.content.trim() === "") {
           return res.status(400).json({ error: `History item at index ${i} must have a non-empty string content.` });
         }
+        if (item.content.length > 2000) {
+          item.content = item.content.substring(0, 2000);
+        }
       }
     }
 
@@ -1176,7 +1352,7 @@ app.post(["/api/chat", "/chat"], async (req, res) => {
       ai = getGeminiClient();
     } catch (keyErr: any) {
       console.error("Gemini client initialization failed:", keyErr);
-      return res.status(500).json({ error: keyErr.message || "Failed to initialize Gemini client." });
+      return res.status(500).json({ error: "Failed to process AI chat request." });
     }
 
     const productsList = await getStoredProducts();
@@ -1241,17 +1417,17 @@ ${productsKnowledgeFormatted}`;
 
     let response;
     try {
-      response = await sendChatMessageWithFallback(ai, message, history || [], systemInstruction);
+      response = await sendChatMessageWithFallback(ai, message, sanitizedHistory, systemInstruction);
     } catch (apiErr: any) {
       console.error("Gemini API call failed:", apiErr);
-      return res.status(502).json({ error: "Gemini API call failed: " + (apiErr.message || "Unknown error") });
+      return res.status(502).json({ error: "AI service temporarily unavailable. Please try again." });
     }
 
     const reply = response.text || "No reply was generated.";
     res.json({ reply });
   } catch (error: any) {
     console.error("Gemini API Error in backend:", error);
-    res.status(500).json({ error: error.message || "An error occurred with Gemini." });
+    res.status(500).json({ error: "Unable to process AI chat request." });
   }
 });
 

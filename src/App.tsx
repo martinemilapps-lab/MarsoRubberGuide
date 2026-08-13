@@ -6,7 +6,7 @@ import { PRODUCT_CATEGORIES, CATEGORY_DETAILS, categoryToSlug, slugToCategory } 
 import ProductCard from "./components/ProductCard";
 import ProductForm from "./components/ProductForm";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-import { AdminGateModal } from "./components/AdminGateModal";
+import { AdminPortal } from "./components/AdminPortal";
 import {
   Language,
   TRANSLATIONS,
@@ -103,6 +103,15 @@ export default function App() {
   const [isAdminCodeGeneratorOpen, setIsAdminCodeGeneratorOpen] = useState(false);
   const [pendingDownloadProduct, setPendingDownloadProduct] = useState<Product | null>(null);
 
+  const [currentPath, setCurrentPath] = useState(() => window.location.pathname);
+
+  const navigateTo = (path: string) => {
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, "", path);
+    }
+    setCurrentPath(path);
+  };
+
   const selectCategoryAndNavigate = (category: ProductClassification | "All") => {
     setSelectedCategory(category);
     setActiveTab("catalog");
@@ -114,11 +123,13 @@ export default function App() {
 
     if (window.location.pathname + window.location.search !== targetUrl) {
       window.history.pushState({ category }, "", targetUrl);
+      setCurrentPath(window.location.pathname);
     }
   };
 
   useEffect(() => {
     const handlePopState = () => {
+      setCurrentPath(window.location.pathname);
       const cat = slugToCategory(window.location.pathname);
       setSelectedCategory(cat);
       setActiveTab("catalog");
@@ -137,35 +148,11 @@ export default function App() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Secret 20-click Admin Gate state
-  const [secretClickCount, setSecretClickCount] = useState(0);
-  const [isGateModalOpen, setIsGateModalOpen] = useState(false);
-  const clickTimerRef = useRef<any>(null);
-
-  const handleSecretCatalogClick = () => {
-    if (isAdmin) return;
-
-    if (clickTimerRef.current) {
-      clearTimeout(clickTimerRef.current);
-    }
-
-    const newCount = secretClickCount + 1;
-    setSecretClickCount(newCount);
-
-    if (newCount >= 20) {
-      setSecretClickCount(0);
-      setIsGateModalOpen(true);
-    } else {
-      clickTimerRef.current = setTimeout(() => {
-        setSecretClickCount(0);
-      }, 1000);
-    }
-  };
-
   // Admin Mode state and authenticated session token management
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
   const [adminToken, setAdminToken] = useState<string | null>(() => sessionStorage.getItem("marso_admin_token"));
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [userRole, setUserRole] = useState<string>("admin");
 
   useEffect(() => {
     if (adminToken) {
@@ -176,6 +163,7 @@ export default function App() {
         .then(data => {
           if (data.authenticated) {
             setIsAdmin(true);
+            if (data.role) setUserRole(data.role);
           } else {
             setIsAdmin(false);
             setAdminToken(null);
@@ -196,14 +184,21 @@ export default function App() {
     sessionStorage.setItem("marso_admin_token", token);
     setAdminToken(token);
     setIsAdmin(true);
-    showToast(isRtl ? "تم تفعيل وضع المشرف الآمن" : "Admin secure edit mode activated");
+    showToast(isRtl ? "تم تفعيل وضع المشرف الآمن" : "Admin secure session activated");
   };
 
   const handleLogoutAdmin = async () => {
+    try {
+      await fetch("/api/admin/logout", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${adminToken || ""}` }
+      });
+    } catch (e) {}
     sessionStorage.removeItem("marso_admin_token");
     setAdminToken(null);
     setIsAdmin(false);
     showToast(isRtl ? "تم تسجيل الخروج من وضع المشرف" : "Logged out of admin mode");
+    navigateTo("/");
   };
 
   // Chat states initialized with welcome message on language change
@@ -790,6 +785,45 @@ Location: Plot 3/34 Neweiba Street, Third Industrial Zone, Egypt
         }
   ) : null;
 
+  if (currentPath.startsWith("/admin")) {
+    if (!isAdmin) {
+      return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+          <AnimatedBackground />
+          <AdminLoginModal
+            isOpen={true}
+            onClose={() => navigateTo("/")}
+            onLoginSuccess={handleAdminLoginSuccess}
+            isRtl={isRtl}
+          />
+        </div>
+      );
+    }
+
+    return (
+      <AdminPortal
+        lang={lang}
+        onLanguageChange={setLang}
+        products={products}
+        categories={categoriesList}
+        adminToken={adminToken}
+        userRole={userRole}
+        onLogout={handleLogoutAdmin}
+        onReturnToCatalog={() => navigateTo("/")}
+        onSaveProduct={handleSaveProduct}
+        onDeleteProduct={async (id) => {
+          setProductToDelete(id);
+          await executeDeleteProduct();
+        }}
+        onAddCategory={handleAddCategory}
+        onEditCategory={handleEditCategory}
+        onDeleteCategory={handleDeleteCategory}
+        onClearUnusedCategories={handleClearUnusedCategories}
+        showToast={showToast}
+      />
+    );
+  }
+
   return (
     <div className="relative h-screen h-[100dvh] w-full max-w-full bg-transparent text-gray-800 flex flex-col overflow-hidden font-sans" dir={t.dir}>
       <AnimatedBackground />
@@ -824,13 +858,6 @@ Location: Plot 3/34 Neweiba Street, Third Industrial Zone, Egypt
               referrerPolicy="no-referrer"
             />
           </div>
-          {/* Secret invisible trigger zone in free space next to logo (20 fast sequential clicks) */}
-          <div
-            id="admin-secret-trigger-zone"
-            onClick={handleSecretCatalogClick}
-            className="h-11 sm:h-14 w-16 sm:w-28 shrink-0 cursor-default select-none bg-transparent"
-            style={{ cursor: "default", userSelect: "none" }}
-          />
           {isAdmin && (
             <div className="flex items-center gap-1.5 shrink-0">
               <div className="flex items-center gap-1 bg-amber-50 border border-amber-200 text-amber-800 px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full text-[10px] font-bold shadow-2xs shrink-0 select-none">
@@ -1872,13 +1899,7 @@ Location: Plot 3/34 Neweiba Street, Third Industrial Zone, Egypt
         )}
       </AnimatePresence>
 
-      {/* Admin Gate Modal (20-Click Passcode Protection) */}
-      <AdminGateModal
-        isOpen={isGateModalOpen}
-        onClose={() => setIsGateModalOpen(false)}
-        onGatePassed={() => setIsAdminLoginOpen(true)}
-        isRtl={isRtl}
-      />
+
 
       {/* Admin Authentication Modal */}
       <AdminLoginModal
