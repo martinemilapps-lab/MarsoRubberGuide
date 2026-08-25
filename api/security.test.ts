@@ -1,5 +1,6 @@
-import { getServerConfig, resetConfigCache } from "./config.ts";
 import {
+  getServerConfig,
+  resetConfigCache,
   getClientIp,
   sanitizePublicProduct,
   generateSecureAccessCode,
