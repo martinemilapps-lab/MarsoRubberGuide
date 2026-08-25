@@ -92,9 +92,9 @@ export default function AdminCodeGeneratorModal({
   const getClientMessageText = () => {
     const code = currentCodeObj ? currentCodeObj.code : "";
     if (isAr) {
-      return `مرحباً بك من شركة مارسو للمطاط وعزل الأرضيات 🏭\nكود الدخول المخصص لك لتحميل ملف المواصفات الفنية والرسومات هو: *${code}*\n(الكود صالح لمدة 5 دقائق من الآن)`;
+      return `مرحباً بك من شركة مارسو للمطاط وعزل الأرضيات 🏭\nكود الدخول المخصص لك لتحميل ملف المواصفات الفنية والرسومات هو: *${code}*\n(الكود صالح لمدة 5 دقائق من الآن واستخدام واحد فقط)`;
     } else {
-      return `Hello from MARSO Rubber Product Specialist 🏭\nYour 4-digit access code to download official technical datasheets is: *${code}*\n(Valid for 5 minutes from now)`;
+      return `Hello from MARSO Rubber Product Specialist 🏭\nYour 8-character access code to download official technical datasheets is: *${code}*\n(Valid for 5 minutes from now and single-use)`;
     }
   };
 
@@ -183,8 +183,8 @@ export default function AdminCodeGeneratorModal({
             </h2>
             <p className="text-xs text-slate-600 leading-relaxed">
               {isAr
-                ? "قم بتوليد كود دخول مكون من 4 أرقام ومشاركته مع العميل لمنحه صلاحية تحميل المواصفات لمدة 5 دقائق."
-                : "Generate a 4-digit access code to share with clients for 5-minute datasheet download access."}
+                ? "قم بتوليد كود دخول مكون من 8 رموز ومشاركته مع العميل لمنحه صلاحية تحميل المواصفات لمدة 5 دقائق."
+                : "Generate an 8-character access code to share with clients for 5-minute datasheet download access."}
             </p>
           </div>
 
@@ -193,7 +193,7 @@ export default function AdminCodeGeneratorModal({
             {/* Generated Code Display Box */}
             <div className="bg-white rounded-2xl p-5 border-2 border-red-200 shadow-sm text-center space-y-3 relative overflow-hidden">
               <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
-                {isAr ? "كود الدخول الصادر للعميل" : "Active 4-Digit Access Code"}
+                {isAr ? "كود الدخول الصادر للعميل" : "Active 8-Character Access Code"}
               </span>
 
               {/* Big Code Display */}
@@ -203,7 +203,7 @@ export default function AdminCodeGeneratorModal({
                     isExpired ? "text-slate-400 line-through" : "text-[#B91C1C]"
                   }`}
                 >
-                  {currentCodeObj ? currentCodeObj.code : "----"}
+                  {currentCodeObj ? currentCodeObj.code : "--------"}
                 </div>
               </div>
 
@@ -242,7 +242,7 @@ export default function AdminCodeGeneratorModal({
                 className="cursor-pointer w-full py-3 bg-[#B91C1C] hover:bg-red-700 text-white font-bold rounded-xl text-xs sm:text-sm transition-all shadow-sm active:scale-98 flex items-center justify-center gap-2"
               >
                 <RefreshCw className="w-4 h-4" />
-                {isAr ? "توليد كود دخول جديد (Generate New Code)" : "Generate New 4-Digit Code"}
+                {isAr ? "توليد كود دخول جديد (Generate New Code)" : "Generate New Access Code"}
               </button>
 
               {/* Dual Copy Buttons */}

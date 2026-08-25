@@ -117,6 +117,8 @@ export default function ProductForm({
     });
   };
 
+  const [autoFilledFields, setAutoFilledFields] = useState<string[]>([]);
+
   const handleFileUpload = async (file: File) => {
     if (!file.type.startsWith("image/")) {
       setPhotoError(isRtl ? "الملف المحدد ليس صورة صالحة" : "Selected file is not a valid image");
@@ -129,9 +131,13 @@ export default function ProductForm({
 
     try {
       const compressed = await compressImageFile(file, 800, 0.75);
+      const token = sessionStorage.getItem("marso_admin_token") || "";
       const res = await fetch("/api/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
         body: JSON.stringify({ fileData: compressed, filename: file.name, contentType: file.type })
       });
 
@@ -165,111 +171,90 @@ export default function ProductForm({
 
     setIsExtracting(true);
     setExtractError("");
+    setAutoFilledFields([]);
 
-    const doUpload = async () => {
-      try {
-        const reader = new FileReader();
-        const base64Data = await new Promise<string>((resolve, reject) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(new Error("Failed to read PDF file"));
-          reader.readAsDataURL(file);
-        });
+    try {
+      const reader = new FileReader();
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error("Failed to read PDF file"));
+        reader.readAsDataURL(file);
+      });
 
-        // 1. Upload to Cloudflare R2 storage via Vercel backend
-        let r2FileUrl = "";
+      const token = sessionStorage.getItem("marso_admin_token") || "";
+      
+      // High-performance single-step upload & Gemini AI extraction
+      const res = await fetch("/api/datasheets/upload-and-extract", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          datasheetFile: base64Data,
+          filename: file.name
+        })
+      });
+
+      if (!res.ok) {
+        let errMsg = isRtl ? "فشل استخراج المواصفات الفنية بواسطة الذكاء الاصطناعي" : "Failed to extract specifications";
         try {
-          const uploadRes = await fetch("/api/upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fileData: base64Data, filename: file.name, contentType: "application/pdf" })
-          });
-          if (uploadRes.ok) {
-            const uploadJson = await uploadRes.json();
-            r2FileUrl = uploadJson.url || uploadJson.key || "";
-          }
-        } catch (e) {
-          console.warn("[R2 Upload Notice]", e);
-        }
-
-        // 2. Extract specs with AI backend
-        const res = await fetch("/api/datasheets/upload-and-extract", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${sessionStorage.getItem("marso_admin_token") || ""}`
-          },
-          body: JSON.stringify({
-            datasheetFile: r2FileUrl || base64Data,
-            filename: file.name
-          })
-        });
-
-        if (!res.ok) {
-          let errMsg = isRtl ? "فشل استخراج المواصفات الفنية بواسطة الذكاء الاصطناعي" : "Failed to extract specifications";
+          const errData = await res.json();
+          errMsg = errData.error || errMsg;
+        } catch (jsonErr) {
           try {
-            const errData = await res.json();
-            errMsg = errData.error || errMsg;
-          } catch (jsonErr) {
-            try {
-              const text = await res.text();
-              if (text && text.length < 200) {
-                errMsg = text;
-              } else {
-                errMsg = `Server error: ${res.status} ${res.statusText}`;
-              }
-            } catch (textErr) {
-              errMsg = `Server error: ${res.status} ${res.statusText}`;
-            }
-          }
-          throw new Error(errMsg);
+            const text = await res.text();
+            if (text && text.length < 200) errMsg = text;
+          } catch (textErr) {}
         }
-
-        const data = await res.json();
-        
-        // Auto-fill form fields!
-        if (data.specs) {
-          if (data.specs.name) setName(data.specs.name);
-          if (data.specs.nameAr) setNameAr(data.specs.nameAr);
-          if (data.specs.category) setCategory(data.specs.category as ProductClassification);
-          if (data.specs.code) setCode(data.specs.code);
-          if (data.specs.sizeDims) setSizeDims(data.specs.sizeDims);
-          if (data.specs.weight) setWeight(data.specs.weight);
-          if (data.specs.features) setFeatures(data.specs.features);
-          if (data.specs.physicalSpecs) setPhysicalSpecs(data.specs.physicalSpecs);
-          if (data.specs.material) setMaterial(data.specs.material);
-          if (data.specs.color) setColor(data.specs.color);
-          if (data.specs.application) setApplication(data.specs.application);
-        }
-
-        setDatasheetFile(data.datasheetFile);
-        setDatasheetName(data.datasheetName);
-        if (data.datasheetKnowledge) {
-          setDatasheetKnowledge(data.datasheetKnowledge);
-        }
-        
-      } catch (err: any) {
-        console.error(err);
-        let errorMsg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
-        
-        let userFriendlyError = isRtl 
-          ? "فشل استخراج البيانات بواسطة الذكاء الاصطناعي." 
-          : "Failed to extract specifications via AI.";
-
-        if (errorMsg.includes("503") || errorMsg.includes("high demand") || errorMsg.includes("UNAVAILABLE")) {
-          userFriendlyError = isRtl
-            ? "تنبيه: خدمة الذكاء الاصطناعي تشهد ضغطاً مؤقتاً (503). تم حفظ وإرفاق ملف الـ PDF بنجاح، ويمكنك إدخال البيانات يدوياً."
-            : "AI service is under temporary high demand (503). Datasheet PDF attached successfully; specs can be entered manually.";
-        } else if (errorMsg && errorMsg.length < 150 && !errorMsg.includes("{")) {
-          userFriendlyError = errorMsg;
-        }
-
-        setExtractError(userFriendlyError);
-      } finally {
-        setIsExtracting(false);
+        throw new Error(errMsg);
       }
-    };
 
-    doUpload();
+      const data = await res.json();
+      
+      // Auto-fill form fields and track populated fields
+      const filled: string[] = [];
+      if (data.specs) {
+        if (data.specs.name) { setName(data.specs.name); filled.push("name"); }
+        if (data.specs.nameAr) { setNameAr(data.specs.nameAr); filled.push("nameAr"); }
+        if (data.specs.category) { setCategory(data.specs.category as ProductClassification); filled.push("category"); }
+        if (data.specs.code) { setCode(data.specs.code); filled.push("code"); }
+        if (data.specs.sizeDims) { setSizeDims(data.specs.sizeDims); filled.push("sizeDims"); }
+        if (data.specs.weight) { setWeight(data.specs.weight); filled.push("weight"); }
+        if (data.specs.features) { setFeatures(data.specs.features); filled.push("features"); }
+        if (data.specs.physicalSpecs) { setPhysicalSpecs(data.specs.physicalSpecs); filled.push("physicalSpecs"); }
+        if (data.specs.material) { setMaterial(data.specs.material); filled.push("material"); }
+        if (data.specs.color) { setColor(data.specs.color); filled.push("color"); }
+        if (data.specs.application) { setApplication(data.specs.application); filled.push("application"); }
+      }
+
+      setAutoFilledFields(filled);
+
+      if (data.datasheetFile) setDatasheetFile(data.datasheetFile);
+      if (data.datasheetName) setDatasheetName(data.datasheetName);
+      if (data.datasheetKnowledge) setDatasheetKnowledge(data.datasheetKnowledge);
+      if (data.warning) setExtractError(data.warning);
+
+    } catch (err: any) {
+      console.error("[Datasheet Upload Error]", err);
+      let errorMsg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
+      
+      let userFriendlyError = isRtl 
+        ? "فشل استخراج البيانات بواسطة الذكاء الاصطناعي." 
+        : "Failed to extract specifications via AI.";
+
+      if (errorMsg.includes("503") || errorMsg.includes("high demand") || errorMsg.includes("UNAVAILABLE")) {
+        userFriendlyError = isRtl
+          ? "تنبيه: خدمة الذكاء الاصطناعي تشهد ضغطاً مؤقتاً (503). تم حفظ وإرفاق ملف الـ PDF بنجاح، ويمكنك إدخال البيانات يدوياً."
+          : "AI service is under temporary high demand (503). Datasheet PDF attached successfully; specs can be entered manually.";
+      } else if (errorMsg && errorMsg.length < 150 && !errorMsg.includes("{")) {
+        userFriendlyError = errorMsg;
+      }
+
+      setExtractError(userFriendlyError);
+    } finally {
+      setIsExtracting(false);
+    }
   };
 
   useEffect(() => {
@@ -563,17 +548,32 @@ export default function ProductForm({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setDatasheetFile("");
-                  setDatasheetName("");
-                }}
-                className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer shrink-0"
-                title={isRtl ? "إزالة" : "Remove"}
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                {datasheetFile && (
+                  <a
+                    href={datasheetFile.startsWith("http") || datasheetFile.startsWith("data:") ? datasheetFile : `/api/products/${product?.id || ""}/datasheet`}
+                    target="_blank"
+                    rel="noreferrer"
+                    download={datasheetName || "datasheet.pdf"}
+                    className="p-1.5 text-gray-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer"
+                    title={isRtl ? "عرض / تحميل ملف المواصفات" : "View / Download Datasheet"}
+                  >
+                    <Link className="w-4 h-4" />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDatasheetFile("");
+                    setDatasheetName("");
+                    setDatasheetKnowledge("");
+                  }}
+                  className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                  title={isRtl ? "إزالة" : "Remove"}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           ) : (
             <div
@@ -645,9 +645,16 @@ export default function ProductForm({
         {/* Bilingual Product Name Fields */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "اسم المنتج باللغة الإنجليزية" : "Product Name (English)"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "اسم المنتج باللغة الإنجليزية" : "Product Name (English)"} *
+              </label>
+              {autoFilledFields.includes("name") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-name-en"
               type="text"
@@ -655,14 +662,21 @@ export default function ProductForm({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Extra-Tough EPDM Mechanical Gasket"
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans text-left"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans text-left ${autoFilledFields.includes("name") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
               dir="ltr"
             />
           </div>
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "اسم المنتج باللغة العربية" : "Product Name (Arabic)"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "اسم المنتج باللغة العربية" : "Product Name (Arabic)"} *
+              </label>
+              {autoFilledFields.includes("nameAr") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-name-ar"
               type="text"
@@ -670,7 +684,7 @@ export default function ProductForm({
               value={nameAr}
               onChange={(e) => setNameAr(e.target.value)}
               placeholder="مثال: جوانات EPDM مبركنة ومسلحة"
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans text-right"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans text-right ${autoFilledFields.includes("nameAr") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
               dir="rtl"
             />
           </div>
@@ -678,14 +692,21 @@ export default function ProductForm({
 
         {/* Classification Selection */}
         <div>
-          <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-            {t.selectCategoryLabel}
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+              {t.selectCategoryLabel}
+            </label>
+            {autoFilledFields.includes("category") && (
+              <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+              </span>
+            )}
+          </div>
           <select
             id="input-category"
             value={category}
             onChange={(e) => setCategory(e.target.value as ProductClassification)}
-            className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+            className={`w-full px-3.5 py-2 border rounded-lg text-sm bg-white focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("category") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
           >
             {Array.from(new Set([...(availableCategories && availableCategories.length > 0 ? availableCategories : PRODUCT_CATEGORIES), category])).map((cat) => (
               <option key={cat} value={cat}>
@@ -744,102 +765,170 @@ export default function ProductForm({
         {/* Specs sub-fields */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "الكود" : "Code"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "الكود" : "Code"}
+              </label>
+              {autoFilledFields.includes("code") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-code"
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder={isRtl ? "مثال: MC-001RM" : "e.g. MC-001RM"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("code") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "المقاس - الابعاد" : "Size-Dims."}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "المقاس - الابعاد" : "Size-Dims."}
+              </label>
+              {autoFilledFields.includes("sizeDims") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-sizeDims"
               type="text"
               value={sizeDims}
               onChange={(e) => setSizeDims(e.target.value)}
               placeholder={isRtl ? "مثال: 100x200 سم، سمك 10 مم" : "e.g. 100x200 cm, Thickness: 10mm"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("sizeDims") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "الوزن" : "Weight"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "الوزن" : "Weight"}
+              </label>
+              {autoFilledFields.includes("weight") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-weight"
               type="text"
               value={weight}
               onChange={(e) => setWeight(e.target.value)}
               placeholder={isRtl ? "مثال: 15.5 - 17 كجم" : "e.g. 15.5 - 17 kg"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("weight") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "المميزات" : "Features"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "المميزات" : "Features"}
+              </label>
+              {autoFilledFields.includes("features") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-features"
               type="text"
               value={features}
               onChange={(e) => setFeatures(e.target.value)}
               placeholder={isRtl ? "مثال: سطح مانع للانزلاق، مقاومة عالية للتهالك" : "e.g. Non-slip surface, highly elastic"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("features") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
-
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "المواصفات الفيزيائية والفنية" : "Physical & Technical Specs"}
+              </label>
+              {autoFilledFields.includes("physicalSpecs") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
+            <input
+              id="input-physicalSpecs"
+              type="text"
+              value={physicalSpecs}
+              onChange={(e) => setPhysicalSpecs(e.target.value)}
+              placeholder={isRtl ? "مثال: صلابة Shore A 65 ± 5، حرارة -30°C إلى +120°C" : "e.g. Shore A 65 ± 5, -30°C to +120°C, Tensile 12MPa"}
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("physicalSpecs") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
+            />
+          </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "المادة" : "Material"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "المادة" : "Material"}
+              </label>
+              {autoFilledFields.includes("material") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-material"
               type="text"
               value={material}
               onChange={(e) => setMaterial(e.target.value)}
               placeholder={isRtl ? "مثال: مطاط SBR معالج" : "e.g. Reclaimed SBR Rubber Compound"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("material") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "اللون" : "Color"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "اللون" : "Color"}
+              </label>
+              {autoFilledFields.includes("color") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-color"
               type="text"
               value={color}
               onChange={(e) => setColor(e.target.value)}
               placeholder={isRtl ? "مثال: أسود" : "e.g. Black"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("color") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5 text-right lg:text-left">
-              {isRtl ? "الاستخدام" : "Application"}
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 text-right lg:text-left">
+                {isRtl ? "الاستخدام" : "Application"}
+              </label>
+              {autoFilledFields.includes("application") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-application"
               type="text"
               value={application}
               onChange={(e) => setApplication(e.target.value)}
               placeholder={isRtl ? "مثال: مزارع اسطبلات مواشي" : "e.g. Stable floors, livestock stalls"}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("application") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
         </div>

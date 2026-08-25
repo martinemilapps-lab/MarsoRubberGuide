@@ -22,6 +22,7 @@ export interface Product {
   datasheetFile?: string;
   datasheetName?: string;
   datasheetKnowledge?: string;
+  hasDatasheet?: boolean;
   price?: string;
   priceCurrency?: "EGP" | "USD";
 }

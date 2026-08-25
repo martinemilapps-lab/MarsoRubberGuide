@@ -2,5 +2,25 @@
     "files.dialog.defaultPath": "D:\\Antigravity Proj_Files",
     "git.defaultCloneDirectory": "D:\\Antigravity Proj_Files",
     "terminal.integrated.cwd": "D:\\Antigravity Proj_Files\\MARSO Rubber Product Specialist",
-    "jupyter.notebookFileRoot": "D:\\Antigravity Proj_Files\\MARSO Rubber Product Specialist"
+    "jupyter.notebookFileRoot": "D:\\Antigravity Proj_Files\\MARSO Rubber Product Specialist",
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/**": true,
+        "**/.next/**": true,
+        "**/dist/**": true,
+        "**/.vercel/**": true,
+        "**/scratch/**": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/node_modules/**": true,
+        "**/.next": true,
+        "**/dist": true,
+        "**/.vercel": true,
+        "**/package-lock.json": true,
+        "**/products.json": true
+    },
+    "typescript.tsserver.maxTsServerMemory": 4096,
+    "typescript.preferences.importModuleSpecifier": "non-relative"
 }

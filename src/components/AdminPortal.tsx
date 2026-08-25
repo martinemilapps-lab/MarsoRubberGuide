@@ -319,10 +319,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
                       <td className="px-6 py-4 text-xs">
                         {p.datasheetFile ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md font-medium">
+                          <a
+                            href={p.datasheetFile.startsWith("http") || p.datasheetFile.startsWith("data:") ? p.datasheetFile : `/api/products/${p.id}/datasheet`}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={p.datasheetName || "datasheet.pdf"}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-md font-medium transition cursor-pointer"
+                            title={isRtl ? "تحميل / عرض ورقة المواصفات" : "Download / View Datasheet"}
+                          >
                             <FileText className="w-3.5 h-3.5" />
-                            <span>{p.datasheetName || "Datasheet.pdf"}</span>
-                          </span>
+                            <span className="max-w-[150px] truncate">{p.datasheetName || "Datasheet.pdf"}</span>
+                          </a>
                         ) : (
                           <span className="text-slate-500 italic">{isRtl ? "غير مرفق" : "None"}</span>
                         )}

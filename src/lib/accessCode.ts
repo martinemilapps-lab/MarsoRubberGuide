@@ -5,20 +5,22 @@ export interface GeneratedCode {
 }
 
 const SESSION_UNLOCK_KEY = "marso_access_unlocked_until";
-const SESSION_CODE_KEY = "marso_verified_access_code";
+const SESSION_PASS_TOKEN_KEY = "marso_datasheet_pass_token";
 
 // 5 Minutes Expiry
 export const CODE_EXPIRY_MS = 5 * 60 * 1000;
 
 /**
- * Unlock datasheet downloads for 5 minutes with a server-verified access code.
+ * Unlock datasheet downloads for 5 minutes with a server-issued short-lived pass token.
+ * Note: The raw access code is NEVER stored in browser storage.
  */
-export function unlockSessionAccess(accessCode: string) {
-  const cleanCode = (accessCode || "").trim();
+export function unlockSessionAccess(passToken: string) {
   const expiresAt = Date.now() + CODE_EXPIRY_MS;
   try {
     sessionStorage.setItem(SESSION_UNLOCK_KEY, expiresAt.toString());
-    sessionStorage.setItem(SESSION_CODE_KEY, cleanCode);
+    if (passToken && typeof passToken === "string") {
+      sessionStorage.setItem(SESSION_PASS_TOKEN_KEY, passToken.trim());
+    }
   } catch (e) {
     console.error("Failed to set session access unlock:", e);
   }
@@ -43,23 +45,23 @@ export function isSessionUnlocked(): boolean {
 }
 
 /**
- * Get the currently stored server-verified access code.
+ * Get the currently stored server-issued short-lived pass token.
  */
-export function getSessionAccessCode(): string {
+export function getSessionPassToken(): string {
   if (!isSessionUnlocked()) return "";
   try {
-    return sessionStorage.getItem(SESSION_CODE_KEY) || "";
+    return sessionStorage.getItem(SESSION_PASS_TOKEN_KEY) || "";
   } catch {
     return "";
   }
 }
 
 /**
- * Clear the current session unlock status and stored access code.
+ * Clear the current session unlock status and stored pass token.
  */
 export function clearSessionAccess(): void {
   try {
     sessionStorage.removeItem(SESSION_UNLOCK_KEY);
-    sessionStorage.removeItem(SESSION_CODE_KEY);
+    sessionStorage.removeItem(SESSION_PASS_TOKEN_KEY);
   } catch {}
 }

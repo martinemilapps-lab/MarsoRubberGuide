@@ -5,12 +5,8 @@ import { unlockSessionAccess } from "../lib/accessCode";
 import {
   ShieldCheck,
   PhoneCall,
-  Key,
   X,
-  CheckCircle2,
   AlertCircle,
-  Sparkles,
-  ArrowRight,
   FileText
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -33,23 +29,18 @@ export default function AccessCodeModal({
   lang
 }: AccessCodeModalProps) {
   const isAr = lang === "ar";
-  const [digits, setDigits] = useState<string[]>(["", "", "", ""]);
+  const [codeValue, setCodeValue] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const inputRefs = [
-    useRef<HTMLInputElement>(null),
-    useRef<HTMLInputElement>(null),
-    useRef<HTMLInputElement>(null),
-    useRef<HTMLInputElement>(null)
-  ];
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
-      setDigits(["", "", "", ""]);
+      setCodeValue("");
       setErrorMsg(null);
       setIsSubmitting(false);
       setTimeout(() => {
-        inputRefs[0].current?.focus();
+        inputRef.current?.focus();
       }, 150);
     }
   }, [isOpen]);
@@ -62,51 +53,19 @@ export default function AccessCodeModal({
       : product.name
     : null;
 
-  const localizedCategory = product
-    ? CATEGORY_TRANSLATIONS[product.category]?.[lang] || product.category
-    : null;
-
-  const handleDigitChange = (index: number, val: string) => {
-    const clean = val.replace(/[^0-9]/g, "");
-    if (!clean) {
-      const newDigits = [...digits];
-      newDigits[index] = "";
-      setDigits(newDigits);
-      setErrorMsg(null);
-      return;
-    }
-
-    const lastChar = clean[clean.length - 1];
-    const newDigits = [...digits];
-    newDigits[index] = lastChar;
-    setDigits(newDigits);
+  const handleInputChange = (val: string) => {
+    const clean = val.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().substring(0, 8);
+    setCodeValue(clean);
     setErrorMsg(null);
-
-    // Auto-advance focus to next digit
-    if (index < 3) {
-      inputRefs[index + 1].current?.focus();
-    }
-
-    // Auto-submit when all 4 digits are filled
-    const fullCode = newDigits.join("");
-    if (fullCode.length === 4 && !newDigits.includes("")) {
-      handleVerify(fullCode);
-    }
   };
 
-  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Backspace" && !digits[index] && index > 0) {
-      inputRefs[index - 1].current?.focus();
-    }
-  };
-
-  const handleVerify = async (codeToVerify?: string) => {
-    const code = (codeToVerify || digits.join("")).trim();
-    if (code.length !== 4 || !/^\d{4}$/.test(code)) {
+  const handleVerify = async (customCode?: string) => {
+    const code = (customCode || codeValue).trim().toUpperCase();
+    if (code.length !== 8) {
       setErrorMsg(
         isAr
-          ? "يرجى إدخال كود الدخول المكون من 4 أرقام كاملة."
-          : "Please enter the complete 4-digit access code."
+          ? "يرجى إدخال كود الدخول المكون من 8 رموز."
+          : "Please enter the complete 8-character access code."
       );
       return;
     }
@@ -118,7 +77,7 @@ export default function AccessCodeModal({
       const res = await fetch("/api/access-code/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code })
+        body: JSON.stringify({ code, productId: product?.id })
       });
 
       const data = await res.json().catch(() => ({}));
@@ -133,15 +92,15 @@ export default function AccessCodeModal({
       }
 
       if (res.ok && data.valid) {
-        unlockSessionAccess(code);
+        unlockSessionAccess(data.passToken || "");
         onSuccessUnlock();
         onClose();
       } else {
         setErrorMsg(
           data.error ||
             (isAr
-              ? "الكود غير صحيح أو انتهت صلاحيته (الكود صالح لمدة 5 دقائق فقط). يرجى التواصل مع فريق المبيعات للحصول على كود جديد."
-              : "Invalid or expired access code (codes expire after 5 minutes). Please contact sales to get a new code.")
+              ? "الكود غير صحيح أو انتهت صلاحيته (الكود صالح لمدة 5 دقائق واستخدام واحد فقط). يرجى التواصل مع فريق المبيعات للحصول على كود جديد."
+              : "Invalid, expired, or previously used access code (codes expire after 5 minutes and are single-use). Please contact sales to get a new code.")
         );
       }
     } catch (err: any) {
@@ -181,14 +140,13 @@ export default function AccessCodeModal({
               <X className="w-4.5 h-4.5" />
             </button>
 
-
             <h2 className="text-xl font-extrabold tracking-tight text-slate-900 mb-1">
               {isAr ? "إدخال كود تحميل المواصفات" : "Enter Datasheet Access Code"}
             </h2>
             <p className="text-xs text-slate-600 leading-relaxed">
               {isAr
-                ? "عزيزي العميل، لحماية ورقة المواصفات الفنية والرسومات الهندسية الخاصة بشركة مارسو، يرجى تزويد كود الدخول المزود من مهندس المبيعات."
-                : "Dear customer, to protect official MARSO technical datasheets and engineering specs, please enter the 4-digit code provided by your sales specialist."}
+                ? "عزيزي العميل، لحماية ورقة المواصفات الفنية والرسومات الهندسية الخاصة بشركة مارسو، يرجى تزويد كود الدخول المزود من مهندس المبيعات (8 رموز)."
+                : "Dear customer, to protect official MARSO technical datasheets and engineering specs, please enter the 8-character access code provided by your sales specialist."}
             </p>
 
             {/* Inquired Product Badge */}
@@ -212,33 +170,28 @@ export default function AccessCodeModal({
 
           {/* Modal Body */}
           <div className="p-5 space-y-4 bg-slate-50/50">
-            {/* 4-Digit Code Input Row */}
+            {/* 8-Character Code Input */}
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-700 block text-center uppercase tracking-wider">
-                {isAr ? "أدخل كود الدخول (4 أرقام):" : "Enter 4-Digit Access Code:"}
+                {isAr ? "أدخل كود الدخول (8 رموز):" : "Enter 8-Character Access Code:"}
               </label>
 
-              <div className="flex items-center justify-center gap-2.5 dir-ltr" dir="ltr">
-                {digits.map((digit, idx) => (
-                  <input
-                    key={idx}
-                    ref={inputRefs[idx]}
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    maxLength={1}
-                    value={digit}
-                    onChange={(e) => handleDigitChange(idx, e.target.value)}
-                    onKeyDown={(e) => handleKeyDown(idx, e)}
-                    className={`w-12 h-14 text-center text-2xl font-mono font-extrabold rounded-xl border-2 transition-all shadow-xs outline-none ${
-                      errorMsg
-                        ? "border-red-400 bg-red-50 text-red-700"
-                        : digit
-                        ? "border-red-600 bg-white text-[#B91C1C] ring-2 ring-red-600/20"
-                        : "border-slate-300 bg-white text-slate-800 focus:border-red-500 focus:ring-2 focus:ring-red-500/20"
-                    }`}
-                  />
-                ))}
+              <div className="flex items-center justify-center dir-ltr" dir="ltr">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  maxLength={8}
+                  value={codeValue}
+                  onChange={(e) => handleInputChange(e.target.value)}
+                  placeholder="e.g. 8K9P2Q4M"
+                  className={`w-full py-3.5 px-4 text-center text-2xl font-mono font-extrabold tracking-widest uppercase rounded-xl border-2 transition-all shadow-xs outline-none ${
+                    errorMsg
+                      ? "border-red-400 bg-red-50 text-red-700"
+                      : codeValue
+                      ? "border-red-600 bg-white text-[#B91C1C] ring-2 ring-red-600/20"
+                      : "border-slate-300 bg-white text-slate-800 focus:border-red-500 focus:ring-2 focus:ring-red-500/20"
+                  }`}
+                />
               </div>
             </div>
 
@@ -259,8 +212,8 @@ export default function AccessCodeModal({
               {/* Verify & Download */}
               <button
                 onClick={() => handleVerify()}
-                disabled={isSubmitting}
-                className="cursor-pointer w-full py-3 bg-[#B91C1C] hover:bg-red-700 text-white font-bold rounded-xl text-xs sm:text-sm transition-all shadow-sm active:scale-98 flex items-center justify-center gap-2"
+                disabled={isSubmitting || codeValue.length !== 8}
+                className="cursor-pointer w-full py-3 bg-[#B91C1C] hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs sm:text-sm transition-all shadow-sm active:scale-98 flex items-center justify-center gap-2"
               >
                 <ShieldCheck className="w-4 h-4" />
                 {isAr ? "تأكيد الكود وتحميل ورقة المواصفات" : "Verify Code & Download Datasheet"}
@@ -285,8 +238,8 @@ export default function AccessCodeModal({
           {/* Footer Note */}
           <div className="p-3.5 bg-white border-t border-slate-200 text-center text-[11px] text-slate-500">
             {isAr
-              ? "ينتهي كود الدخول تلقائياً بعد 5 دقائق من إصداره من قِبل مهندس المبيعات."
-              : "Access codes automatically expire 5 minutes after issuance by the sales team."}
+              ? "ينتهي كود الدخول تلقائياً بعد 5 دقائق واستخدام واحد فقط من إصداره من قِبل مهندس المبيعات."
+              : "Access codes expire after 5 minutes and single-use after issuance by the sales team."}
           </div>
         </motion.div>
       </div>
