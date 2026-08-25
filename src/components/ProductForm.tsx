@@ -3,6 +3,7 @@ import { Product, ProductClassification } from "../types";
 import { PRODUCT_CATEGORIES } from "../constants";
 import { Language, TRANSLATIONS, CATEGORY_TRANSLATIONS } from "../locales";
 import { X, Save, AlertCircle, Image as ImageIcon, Upload, Trash2, Link, Check, Plus, FileText, Sparkles, Loader2 } from "lucide-react";
+import { extractText } from "unpdf";
 
 interface ProductFormProps {
   product?: Product | null; // if modifying
@@ -174,6 +175,8 @@ export default function ProductForm({
     setAutoFilledFields([]);
 
     try {
+      // 1. Immediately read binary buffer & base64
+      const arrayBuffer = await file.arrayBuffer();
       const reader = new FileReader();
       const base64Data = await new Promise<string>((resolve, reject) => {
         reader.onload = () => resolve(reader.result as string);
@@ -181,22 +184,37 @@ export default function ProductForm({
         reader.readAsDataURL(file);
       });
 
-      // 1. Immediately attach datasheet to product state so it is never lost
+      // Always attach datasheet to state
       setDatasheetFile(base64Data);
       setDatasheetName(file.name);
 
-      // If file is larger than 4MB, skip cloud AI payload extraction to prevent serverless 4.5MB gateway limits
-      if (file.size > 4 * 1024 * 1024) {
-        setExtractError(
-          isRtl
-            ? "تم إرفاق ملف الـ PDF بنجاح. نظراً لكبر حجم الملف (> 4 ميجابايت)، يرجى إدخال المواصفات يدوياً."
-            : "PDF attached successfully. Automated AI extraction skipped for large PDF (>4MB); specs can be entered manually."
-        );
-        setIsExtracting(false);
-        return;
+      // 2. High-speed client-side text extraction (< 50ms)
+      let extractedClientText = "";
+      try {
+        const pdfData = await extractText(new Uint8Array(arrayBuffer));
+        if (pdfData && pdfData.text) {
+          extractedClientText = Array.isArray(pdfData.text) ? pdfData.text.join("\n") : String(pdfData.text);
+          extractedClientText = extractedClientText.trim();
+        }
+      } catch (unpdfErr) {
+        console.warn("[Client Text Extraction Warning]", unpdfErr);
       }
 
       const token = sessionStorage.getItem("marso_admin_token") || localStorage.getItem("marso_admin_token") || "";
+
+      // 3. Prepare payload: prioritize lightweight text payload (< 20KB) to bypass any payload limits & execute instantly
+      const payload: Record<string, any> = {
+        filename: file.name
+      };
+
+      if (extractedClientText && extractedClientText.length > 20) {
+        payload.pdfText = extractedClientText;
+        if (file.size < 3.5 * 1024 * 1024) {
+          payload.datasheetFile = base64Data;
+        }
+      } else {
+        payload.datasheetFile = base64Data;
+      }
       
       // High-performance single-step upload & Gemini AI extraction
       const res = await fetch("/api/datasheets/upload-and-extract", {
@@ -206,10 +224,7 @@ export default function ProductForm({
           "Content-Type": "application/json",
           ...(token ? { "Authorization": `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
-          datasheetFile: base64Data,
-          filename: file.name
-        })
+        body: JSON.stringify(payload)
       });
 
       if (!res.ok) {
@@ -233,15 +248,6 @@ export default function ProductForm({
           return;
         }
 
-        if (res.status === 413) {
-          setExtractError(
-            isRtl
-              ? "تم إرفاق ملف الـ PDF بنجاح. حجم الملف كبير على المعالجة السحابية المباشرة، ويمكنك إدخال المواصفات يدوياً."
-              : "PDF attached successfully. File payload exceeds serverless limit; specs can be entered manually."
-          );
-          return;
-        }
-
         throw new Error(errMsg || (isRtl ? "تم إرفاق الملف، وتعذر استخراج المواصفات تلقائياً" : "PDF attached; automated extraction unavailable"));
       }
 
@@ -261,6 +267,8 @@ export default function ProductForm({
         if (data.specs.material) { setMaterial(data.specs.material); filled.push("material"); }
         if (data.specs.color) { setColor(data.specs.color); filled.push("color"); }
         if (data.specs.application) { setApplication(data.specs.application); filled.push("application"); }
+        if (data.specs.price) { setPrice(data.specs.price); filled.push("price"); }
+        if (data.specs.priceCurrency) { setPriceCurrency(data.specs.priceCurrency === "USD" ? "USD" : "EGP"); }
       }
 
       setAutoFilledFields(filled);
@@ -577,10 +585,22 @@ export default function ProductForm({
                 </div>
                 <div className="min-w-0">
                   <p className="text-xs font-bold text-gray-800 truncate" dir="ltr">{datasheetName}</p>
-                  <p className="text-[10px] text-emerald-600 font-medium flex items-center gap-1">
-                    <Check className="w-3 h-3 stroke-[3]" />
-                    <span>{isRtl ? "مستخرج ومعبأ بالذكاء الاصطناعي بنجاح" : "Successfully extracted via AI"}</span>
-                  </p>
+                  {isExtracting ? (
+                    <p className="text-[10px] text-amber-600 font-medium flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin text-amber-500" />
+                      <span>{isRtl ? "جاري الاستخراج بالذكاء الاصطناعي..." : "AI analyzing & extracting specs..."}</span>
+                    </p>
+                  ) : autoFilledFields.length > 0 ? (
+                    <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1">
+                      <Check className="w-3 h-3 stroke-[3]" />
+                      <span>{isRtl ? `تم استخراج وتعبئة ${autoFilledFields.length} حقول بالذكاء الاصطناعي بنجاح` : `Successfully extracted via AI (${autoFilledFields.length} specs auto-filled)`}</span>
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
+                      <FileText className="w-3 h-3 text-slate-400" />
+                      <span>{isRtl ? "ملف المواصفات الفنية مرفق" : "Datasheet PDF attached"}</span>
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
@@ -754,16 +774,23 @@ export default function ProductForm({
         {/* Price & Currency Field */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-gray-50/80 p-3.5 rounded-xl border border-gray-200/80">
           <div className="sm:col-span-2">
-            <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1 text-right lg:text-left">
-              {t.priceLabel}
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 text-right lg:text-left">
+                {t.priceLabel}
+              </label>
+              {autoFilledFields.includes("price") && (
+                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-emerald-600" /> {isRtl ? "تلقائي" : "AI Filled"}
+                </span>
+              )}
+            </div>
             <input
               id="input-price"
               type="text"
               value={price}
               onChange={(e) => setPrice(e.target.value)}
               placeholder={t.pricePlaceholder}
-              className="w-full px-3.5 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans"
+              className={`w-full px-3.5 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100 transition-all font-sans ${autoFilledFields.includes("price") ? "border-emerald-300 bg-emerald-50/20" : "border-gray-200"}`}
             />
           </div>
           <div>

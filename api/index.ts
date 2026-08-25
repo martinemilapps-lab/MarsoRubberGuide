@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
 import { createClient as createTursoClient } from "@libsql/client";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { extractText } from "unpdf";
 import productsData from "../products.json" with { type: "json" };
 export interface ServerConfig {
   isProduction: boolean;
@@ -1933,75 +1934,91 @@ app.get(["/api/products/:id/datasheet", "/products/:id/datasheet"], async (req, 
 // 6. Upload and AI Extract Specs from PDF Datasheet (RBAC: Admin or Editor)
 app.post(["/api/datasheets/upload-and-extract", "/datasheets/upload-and-extract"], checkEditorOrAdminAuth, async (req, res) => {
   try {
-    const { datasheetFile, filename } = req.body;
-    if (!datasheetFile) {
-      return res.status(400).json({ error: "datasheetFile is required." });
-    }
-
-    let validatedPdfRef: string | null = null;
-    try {
-      validatedPdfRef = validateAndCleanPdfReference(datasheetFile);
-    } catch (valErr: any) {
-      return res.status(400).json({ error: valErr.message || "Invalid PDF datasheet payload." });
-    }
-
-    if (!validatedPdfRef) {
-      return res.status(400).json({ error: "Invalid PDF datasheet reference." });
+    const { datasheetFile, filename, pdfText } = req.body;
+    if (!datasheetFile && !pdfText) {
+      return res.status(400).json({ error: "datasheetFile or pdfText is required." });
     }
 
     const originalName = filename ? String(filename).replace(/[^a-zA-Z0-9.-]/g, "_").substring(0, 255) : `datasheet_${Date.now()}.pdf`;
+    let validatedPdfRef: string | null = null;
     let cleanBase64 = "";
     let pdfBuffer: Buffer | null = null;
+    let extractedRawText: string = typeof pdfText === "string" ? pdfText.trim() : "";
 
-    if (validatedPdfRef.startsWith("http://") || validatedPdfRef.startsWith("https://")) {
-      if (!isTrustedRemoteAssetUrl(validatedPdfRef)) {
-        return res.status(400).json({ error: "Remote PDF URL is not from a trusted R2 origin." });
-      }
-      const response = await fetch(validatedPdfRef, { signal: AbortSignal.timeout(15000) });
-      if (!response.ok) {
-        return res.status(404).json({ error: "Failed to fetch PDF from trusted R2 URL." });
-      }
-      const arrayBuffer = await response.arrayBuffer();
-      pdfBuffer = Buffer.from(arrayBuffer);
-      cleanBase64 = pdfBuffer.toString("base64");
-    } else if (validatedPdfRef.startsWith("data:")) {
-      const parsed = parseDataUrl(validatedPdfRef);
-      if (!parsed || parsed.mimeType !== "application/pdf") {
-        return res.status(400).json({ error: "Invalid PDF data URL or unsupported MIME type." });
-      }
-      pdfBuffer = parsed.buffer;
-      cleanBase64 = parsed.buffer.toString("base64");
-    } else {
-      pdfBuffer = Buffer.from(validatedPdfRef, "base64");
-      cleanBase64 = validatedPdfRef;
-    }
-
-    if (!pdfBuffer || !validatePdfMagicBytes(pdfBuffer)) {
-      return res.status(400).json({ error: "Invalid PDF file structure or corrupt data." });
-    }
-
-    // Persist storage (R2 and/or local disk)
-    let finalDatasheetFile = validatedPdfRef;
-    if (s3Client && config.r2AccountId && !config.r2AccountId.includes("your_")) {
+    if (datasheetFile) {
       try {
-        const r2Url = await uploadToR2(originalName, pdfBuffer, "application/pdf");
-        if (r2Url) {
-          finalDatasheetFile = r2Url;
+        validatedPdfRef = validateAndCleanPdfReference(datasheetFile);
+      } catch (valErr: any) {
+        return res.status(400).json({ error: valErr.message || "Invalid PDF datasheet payload." });
+      }
+
+      if (validatedPdfRef) {
+        if (validatedPdfRef.startsWith("http://") || validatedPdfRef.startsWith("https://")) {
+          if (!isTrustedRemoteAssetUrl(validatedPdfRef)) {
+            return res.status(400).json({ error: "Remote PDF URL is not from a trusted R2 origin." });
+          }
+          const response = await fetch(validatedPdfRef, { signal: AbortSignal.timeout(15000) });
+          if (!response.ok) {
+            return res.status(404).json({ error: "Failed to fetch PDF from trusted R2 URL." });
+          }
+          const arrayBuffer = await response.arrayBuffer();
+          pdfBuffer = Buffer.from(arrayBuffer);
+          cleanBase64 = pdfBuffer.toString("base64");
+        } else if (validatedPdfRef.startsWith("data:")) {
+          const parsed = parseDataUrl(validatedPdfRef);
+          if (!parsed || parsed.mimeType !== "application/pdf") {
+            return res.status(400).json({ error: "Invalid PDF data URL or unsupported MIME type." });
+          }
+          pdfBuffer = parsed.buffer;
+          cleanBase64 = parsed.buffer.toString("base64");
+        } else {
+          pdfBuffer = Buffer.from(validatedPdfRef, "base64");
+          cleanBase64 = validatedPdfRef;
         }
-      } catch (r2Err) {
-        console.warn("[R2 Storage Warning] Failed uploading PDF to R2:", r2Err);
+
+        if (pdfBuffer && !validatePdfMagicBytes(pdfBuffer)) {
+          return res.status(400).json({ error: "Invalid PDF file structure or corrupt data." });
+        }
+
+        // Try ultra-fast server-side text extraction if pdfText wasn't supplied by client
+        if (!extractedRawText && pdfBuffer) {
+          try {
+            const pdfData = await extractText(new Uint8Array(pdfBuffer));
+            if (pdfData && pdfData.text) {
+              extractedRawText = Array.isArray(pdfData.text) ? pdfData.text.join("\n") : String(pdfData.text);
+              extractedRawText = extractedRawText.trim();
+            }
+          } catch (unpdfErr) {
+            console.warn("[unpdf Extraction Warning]", unpdfErr);
+          }
+        }
       }
     }
 
-    // Save copy to local DATASHEETS_DIR
-    try {
-      const diskFilename = `upload-${Date.now()}-${originalName}`;
-      fs.writeFileSync(path.join(DATASHEETS_DIR, diskFilename), pdfBuffer);
-      if (!finalDatasheetFile.startsWith("http") && !finalDatasheetFile.startsWith("data:")) {
-        finalDatasheetFile = diskFilename;
+    // Persist storage (R2 and/or local disk) if datasheetFile is present
+    let finalDatasheetFile = validatedPdfRef || "";
+    if (pdfBuffer) {
+      if (s3Client && config.r2AccountId && !config.r2AccountId.includes("your_")) {
+        try {
+          const r2Url = await uploadToR2(originalName, pdfBuffer, "application/pdf");
+          if (r2Url) {
+            finalDatasheetFile = r2Url;
+          }
+        } catch (r2Err) {
+          console.warn("[R2 Storage Warning] Failed uploading PDF to R2:", r2Err);
+        }
       }
-    } catch (diskErr) {
-      console.warn("[Datasheet Disk Save Warning]", diskErr);
+
+      // Save copy to local DATASHEETS_DIR
+      try {
+        const diskFilename = `upload-${Date.now()}-${originalName}`;
+        fs.writeFileSync(path.join(DATASHEETS_DIR, diskFilename), pdfBuffer);
+        if (!finalDatasheetFile.startsWith("http") && !finalDatasheetFile.startsWith("data:")) {
+          finalDatasheetFile = diskFilename;
+        }
+      } catch (diskErr) {
+        console.warn("[Datasheet Disk Save Warning]", diskErr);
+      }
     }
 
     // AI Extraction with Gemini 2.5 Flash
@@ -2011,31 +2028,45 @@ app.post(["/api/datasheets/upload-and-extract", "/datasheets/upload-and-extract"
 
     try {
       const ai = getGeminiClient();
-      const pdfPart = {
-        inlineData: {
-          data: cleanBase64,
-          mimeType: "application/pdf"
-        }
-      };
+      let contents: any[] = [];
 
-      const promptPart = {
-        text: `Analyze the attached PDF datasheet for a manufacturing/rubber product and extract its technical specifications. Output a clean JSON object containing exactly the following properties:
-1. name: The official brand or model name of the product in English.
-2. nameAr: The official brand or model name of the product in Arabic. Translate accurately if only in English.
-3. category: Exactly one of the 8 allowed categories: "Reclaimed and Crumb Rubber", "Rubber Tile Flooring", "Rubber Mat Flooring", "Industrial Rubber Flooring", "Rubber Automotive Spare Parts", "Rubber Car Mats", "Constructive Rubber Industries", "Reverse Engineering".
-4. code: Unique catalog/model code.
-5. sizeDims: Dimensions, sizes, thickness.
-6. weight: Weight or density.
-7. features: Major features or certifications.
-8. physicalSpecs: Shore hardness, temperature limits, tensile strength.
-9. material: Rubber type or material ingredients.
-10. color: Colors available.
-11. application: Intended uses.
+      const promptInstruction = `Analyze the provided industrial rubber product datasheet and accurately extract all technical specifications into a clean JSON object for our catalog.
+Fields to extract:
+1. name: Official brand/model name of the rubber product in English (e.g., "Agricultural & Farm Rubber Mats MC-001RM").
+2. nameAr: Accurate commercial Arabic title (e.g., "حصير مطاطي زراعي وللمزارع والاسطبلات").
+3. category: The best matching catalog category: "Rubber Mat Flooring", "Rubber Tile Flooring", "Industrial Rubber Flooring", "Rubber Automotive Spare Parts", "Rubber Car Mats", "Constructive Rubber Industries", "Reclaimed and Crumb Rubber", or "Reverse Engineering".
+4. code: Catalog/Model product code (e.g., "MC-001RM").
+5. sizeDims: Available sizes, rolls, tiles, and thickness measurements (e.g., "1.2m x 10m x 10mm" or "1000mm x 1000mm").
+6. weight: Weight per square meter, unit weight, or density.
+7. features: Key distinguishing properties, hidden technical benefits, anti-fatigue, anti-slip, weather-proof, chemical resistance, and quality certifications.
+8. physicalSpecs: Shore A hardness, tensile strength, elongation at break, temperature range, and compression set.
+9. material: Rubber compound formulation (e.g., "Natural Rubber & SBR Blend", "EPDM Vulcanized Rubber").
+10. color: Colors available (e.g., "Black / Dark Grey").
+11. application: Recommended applications and installation environments (e.g., "Dairy barns, equestrian stables, animal transport, walkways").
+12. price: Numeric price if mentioned in document, else empty string.
+13. priceCurrency: "EGP" or "USD".
 
-Keep values highly accurate but concise.`
-      };
+Ensure values are complete, clean, professional, and directly useful for the product card.`;
 
-      const response = await generateContentWithFallback(ai, [pdfPart, promptPart], {
+      if (extractedRawText && extractedRawText.length > 20) {
+        contents = [{
+          text: `${promptInstruction}\n\n=== DATASHEET TEXT CONTENT ===\n${extractedRawText.substring(0, 50000)}`
+        }];
+      } else if (cleanBase64) {
+        contents = [
+          {
+            inlineData: {
+              data: cleanBase64,
+              mimeType: "application/pdf"
+            }
+          },
+          { text: promptInstruction }
+        ];
+      } else {
+        throw new Error("No PDF content or readable text provided for extraction.");
+      }
+
+      const response = await generateContentWithFallback(ai, contents, {
         responseMimeType: "application/json",
         temperature: 0.1,
         responseSchema: {
@@ -2051,7 +2082,9 @@ Keep values highly accurate but concise.`
             physicalSpecs: { type: "STRING" },
             material: { type: "STRING" },
             color: { type: "STRING" },
-            application: { type: "STRING" }
+            application: { type: "STRING" },
+            price: { type: "STRING" },
+            priceCurrency: { type: "STRING" }
           },
           required: ["name", "nameAr", "category", "code", "sizeDims", "weight", "features", "physicalSpecs", "material", "color", "application"]
         }
@@ -2069,17 +2102,18 @@ Keep values highly accurate but concise.`
 - Technical & Physical Specs: ${parsedSpecs.physicalSpecs}
 - Material Compounds: ${parsedSpecs.material}
 - Color Options: ${parsedSpecs.color}
-- Applications & Uses: ${parsedSpecs.application}`;
+- Applications & Uses: ${parsedSpecs.application}
+${parsedSpecs.price ? `- Rate / Price: ${parsedSpecs.price} ${parsedSpecs.priceCurrency || 'EGP'}` : ''}`;
       }
     } catch (aiErr: any) {
-      console.warn("[Gemini Datasheet Extraction Notice] AI extraction failed or timed out:", aiErr.message || aiErr);
-      aiWarning = "Datasheet PDF attached successfully. AI auto-extraction was unavailable; you can enter specs manually.";
+      console.warn("[Gemini Datasheet Extraction Notice] AI extraction notice:", aiErr.message || aiErr);
+      aiWarning = "Datasheet attached successfully. Automated extraction encountered an issue; specs can be entered manually.";
     }
 
     return res.json({
       success: true,
       specs: parsedSpecs,
-      datasheetFile: finalDatasheetFile,
+      datasheetFile: finalDatasheetFile || datasheetFile,
       datasheetName: originalName,
       datasheetKnowledge: datasheetKnowledgeSummary,
       warning: aiWarning
