@@ -181,14 +181,30 @@ export default function ProductForm({
         reader.readAsDataURL(file);
       });
 
-      const token = sessionStorage.getItem("marso_admin_token") || "";
+      // 1. Immediately attach datasheet to product state so it is never lost
+      setDatasheetFile(base64Data);
+      setDatasheetName(file.name);
+
+      // If file is larger than 4MB, skip cloud AI payload extraction to prevent serverless 4.5MB gateway limits
+      if (file.size > 4 * 1024 * 1024) {
+        setExtractError(
+          isRtl
+            ? "تم إرفاق ملف الـ PDF بنجاح. نظراً لكبر حجم الملف (> 4 ميجابايت)، يرجى إدخال المواصفات يدوياً."
+            : "PDF attached successfully. Automated AI extraction skipped for large PDF (>4MB); specs can be entered manually."
+        );
+        setIsExtracting(false);
+        return;
+      }
+
+      const token = sessionStorage.getItem("marso_admin_token") || localStorage.getItem("marso_admin_token") || "";
       
       // High-performance single-step upload & Gemini AI extraction
       const res = await fetch("/api/datasheets/upload-and-extract", {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
           datasheetFile: base64Data,
@@ -197,17 +213,36 @@ export default function ProductForm({
       });
 
       if (!res.ok) {
-        let errMsg = isRtl ? "فشل استخراج المواصفات الفنية بواسطة الذكاء الاصطناعي" : "Failed to extract specifications";
+        let errMsg = "";
         try {
           const errData = await res.json();
-          errMsg = errData.error || errMsg;
+          errMsg = errData.error || "";
         } catch (jsonErr) {
           try {
             const text = await res.text();
             if (text && text.length < 200) errMsg = text;
           } catch (textErr) {}
         }
-        throw new Error(errMsg);
+
+        if (res.status === 401) {
+          setExtractError(
+            isRtl
+              ? "تم إرفاق ملف الـ PDF. جلسة المشرف غير مصرحة أو انتهت، ويمكنك إدخال المواصفات يدوياً أو إعادة تسجيل الدخول."
+              : "PDF attached. Admin session expired or unauthenticated; specs can be entered manually."
+          );
+          return;
+        }
+
+        if (res.status === 413) {
+          setExtractError(
+            isRtl
+              ? "تم إرفاق ملف الـ PDF بنجاح. حجم الملف كبير على المعالجة السحابية المباشرة، ويمكنك إدخال المواصفات يدوياً."
+              : "PDF attached successfully. File payload exceeds serverless limit; specs can be entered manually."
+          );
+          return;
+        }
+
+        throw new Error(errMsg || (isRtl ? "تم إرفاق الملف، وتعذر استخراج المواصفات تلقائياً" : "PDF attached; automated extraction unavailable"));
       }
 
       const data = await res.json();
@@ -240,13 +275,13 @@ export default function ProductForm({
       let errorMsg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
       
       let userFriendlyError = isRtl 
-        ? "فشل استخراج البيانات بواسطة الذكاء الاصطناعي." 
-        : "Failed to extract specifications via AI.";
+        ? "تم إرفاق ملف الـ PDF بنجاح. تعذر استخراج المواصفات تلقائياً، ويمكنك إدخالها يدوياً." 
+        : "PDF attached successfully. Automated extraction unavailable; specs can be entered manually.";
 
       if (errorMsg.includes("503") || errorMsg.includes("high demand") || errorMsg.includes("UNAVAILABLE")) {
         userFriendlyError = isRtl
-          ? "تنبيه: خدمة الذكاء الاصطناعي تشهد ضغطاً مؤقتاً (503). تم حفظ وإرفاق ملف الـ PDF بنجاح، ويمكنك إدخال البيانات يدوياً."
-          : "AI service is under temporary high demand (503). Datasheet PDF attached successfully; specs can be entered manually.";
+          ? "تم حفظ وإرفاق ملف الـ PDF بنجاح. خدمة الذكاء الاصطناعي تشهد ضغطاً مؤقتاً (503)، ويمكنك إدخال البيانات يدوياً."
+          : "PDF attached successfully. AI service is under temporary high demand (503); specs can be entered manually.";
       } else if (errorMsg && errorMsg.length < 150 && !errorMsg.includes("{")) {
         userFriendlyError = errorMsg;
       }

@@ -917,7 +917,8 @@ function checkRoleAuth(allowedRoles: string[]) {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const clientIp = getClientIp(req);
     const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+    const cookieToken = req.headers.cookie?.match(/marso_session=([^;]+)/)?.[1] || null;
+    const token = (authHeader && authHeader.startsWith("Bearer ")) ? authHeader.substring(7).trim() : (cookieToken || null);
 
     if (!token) {
       logAuditEvent({
